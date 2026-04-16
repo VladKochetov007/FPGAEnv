@@ -60,9 +60,9 @@ If any stage fails, the verdict maps to the appropriate category (COMPILE_ERROR,
 ### Full formula
 
 ```
-         ⎧ 0                                   if verdict ≠ OK
+          ⎧ 0                                   if verdict ≠ OK
 S(code) = ⎨
-         ⎩ baseline / (baseline + measured)    if verdict = OK
+          ⎩ baseline / (baseline + measured)    if verdict = OK
 ```
 
 `measured` is the **total clock cycles** summed across all test cases for the submission. `baseline` is the same metric for a handwritten reference implementation of the same algorithm.
