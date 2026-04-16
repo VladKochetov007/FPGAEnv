@@ -55,7 +55,7 @@ POPCOUNT32 = FPGATask(
     name="popcount32",
     in_bits=32,
     out_bits=6,
-    baseline_cycles=32 * 32,
+    baseline_cycles=1056,
     max_cycles_per_case=128,
     prompt=(
         "Implement Verilog module `dut` with the interface below.\n"
@@ -68,8 +68,8 @@ POPCOUNT32 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [31:0]      data_in,\n"
-        "    output [5:0]       data_out,\n"
-        "    output             done\n"
+        "    output reg [5:0]   data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_popcount,
@@ -97,7 +97,7 @@ BITREV16 = FPGATask(
     name="bitrev16",
     in_bits=16,
     out_bits=16,
-    baseline_cycles=16 * 16,
+    baseline_cycles=510,
     max_cycles_per_case=64,
     prompt=(
         "Implement `dut` returning the bit-reversal of the 16-bit `data_in`.\n"
@@ -107,8 +107,8 @@ BITREV16 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [15:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_bitrev16,
@@ -148,7 +148,7 @@ GCD16 = FPGATask(
     name="gcd16",
     in_bits=32,
     out_bits=16,
-    baseline_cycles=16 * 80,
+    baseline_cycles=500,
     max_cycles_per_case=4096,
     prompt=(
         "Implement `dut` computing gcd(x, y) for 16-bit unsigneds packed as\n"
@@ -159,8 +159,8 @@ GCD16 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [31:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_gcd,
@@ -186,7 +186,7 @@ MUL8 = FPGATask(
     name="mul8",
     in_bits=16,
     out_bits=16,
-    baseline_cycles=32 * 10,   # shift-add baseline: ~10 cycles/case
+    baseline_cycles=288,
     max_cycles_per_case=64,
     prompt=(
         "Implement `dut` computing the 16-bit product of two 8-bit unsigned\n"
@@ -198,8 +198,8 @@ MUL8 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [15:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_mul8,
@@ -235,7 +235,7 @@ DIV16 = FPGATask(
     name="div16",
     in_bits=32,
     out_bits=32,
-    baseline_cycles=25 * 20,   # restoring division baseline
+    baseline_cycles=450,
     max_cycles_per_case=128,
     prompt=(
         "Implement `dut` computing unsigned 16-bit division with remainder.\n"
@@ -247,8 +247,8 @@ DIV16 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [31:0]      data_in,\n"
-        "    output [31:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [31:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_div16,
@@ -282,7 +282,7 @@ ISQRT32 = FPGATask(
     name="isqrt32",
     in_bits=32,
     out_bits=16,
-    baseline_cycles=32 * 20,
+    baseline_cycles=576,
     max_cycles_per_case=128,
     prompt=(
         "Implement `dut` computing the integer square root of a 32-bit\n"
@@ -294,8 +294,8 @@ ISQRT32 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [31:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_isqrt32,
@@ -334,7 +334,7 @@ CRC8 = FPGATask(
     name="crc8",
     in_bits=16,
     out_bits=8,
-    baseline_cycles=16 * 18,   # bit-serial CRC baseline: 16 cycles/case
+    baseline_cycles=540,
     max_cycles_per_case=96,
     prompt=(
         "Implement CRC-8/MAXIM over a 16-bit payload (reflected, polynomial\n"
@@ -346,8 +346,8 @@ CRC8 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [15:0]      data_in,\n"
-        "    output [7:0]       data_out,\n"
-        "    output             done\n"
+        "    output reg [7:0]   data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_crc8_maxim,
@@ -376,7 +376,7 @@ XOR_CIPHER16 = FPGATask(
     name="xor_cipher16",
     in_bits=16,
     out_bits=16,
-    baseline_cycles=16 * 3,
+    baseline_cycles=31,
     max_cycles_per_case=32,
     prompt=(
         "Implement `dut` as a one-round XOR 'block cipher' using the fixed\n"
@@ -388,8 +388,8 @@ XOR_CIPHER16 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [15:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_xor_cipher16,
@@ -423,7 +423,7 @@ ADLER32 = FPGATask(
     name="adler32",
     in_bits=32,
     out_bits=16,
-    baseline_cycles=29 * 12,
+    baseline_cycles=174,
     max_cycles_per_case=96,
     prompt=(
         "Implement a 4-byte Adler-lite rolling checksum. Stream bytes from\n"
@@ -435,8 +435,8 @@ ADLER32 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [31:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_parity32_adler,
@@ -487,7 +487,7 @@ MATVEC_2X2_INT4 = FPGATask(
     name="matvec_2x2_int4",
     in_bits=24,
     out_bits=16,
-    baseline_cycles=28 * 8,   # 4 MAC + reduce serialised
+    baseline_cycles=168,
     max_cycles_per_case=64,
     prompt=(
         "Implement a 2x2 signed int4 matrix times a 2x1 signed int4 vector.\n"
@@ -501,8 +501,8 @@ MATVEC_2X2_INT4 = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [23:0]      data_in,\n"
-        "    output [15:0]      data_out,\n"
-        "    output             done\n"
+        "    output reg [15:0]  data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_matvec_2x2_int4,
@@ -556,7 +556,7 @@ RAY_HIT_2D = FPGATask(
     name="ray_hit_2d",
     in_bits=24,
     out_bits=1,
-    baseline_cycles=32 * 12,
+    baseline_cycles=192,
     max_cycles_per_case=96,
     prompt=(
         "Decide whether a 2D ray from origin O = (ox, oy) in direction\n"
@@ -571,8 +571,8 @@ RAY_HIT_2D = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [23:0]      data_in,\n"
-        "    output [0:0]       data_out,\n"
-        "    output             done\n"
+        "    output reg [0:0]   data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_ray_hit,
@@ -614,7 +614,7 @@ ARBITER_RR = FPGATask(
     name="arbiter_rr",
     in_bits=11,
     out_bits=4,
-    baseline_cycles=32 * 4,
+    baseline_cycles=105,
     max_cycles_per_case=32,
     prompt=(
         "Implement a round-robin arbiter (load balancer) over 8 requesters.\n"
@@ -627,8 +627,8 @@ ARBITER_RR = FPGATask(
         "    input              rst,\n"
         "    input              start,\n"
         "    input  [10:0]      data_in,\n"
-        "    output [3:0]       data_out,\n"
-        "    output             done\n"
+        "    output reg [3:0]   data_out,\n"
+        "    output reg         done\n"
         ");\n"
     ),
     reference_py=_round_robin_grant,
