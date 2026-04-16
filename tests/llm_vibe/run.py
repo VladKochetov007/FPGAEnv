@@ -5,7 +5,8 @@ run Verilog responses through the environment, report results.
 Usage:
     .venv/bin/python tests/llm_vibe/run.py
     .venv/bin/python tests/llm_vibe/run.py --tasks popcount32,xor_cipher16
-    .venv/bin/python tests/llm_vibe/run.py --models google/gemma-3-12b-it:free
+    .venv/bin/python tests/llm_vibe/run.py --models anthropic/claude-sonnet-4.6
+    .venv/bin/python tests/llm_vibe/run.py --no-transcripts
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +33,7 @@ from rlvr_envs.envs.fpga.environment import FPGAEnvironment
 from rlvr_envs.envs.fpga.tasks import TASK_REGISTRY
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 
 MODELS = [
     "deepseek/deepseek-v3.2",
@@ -134,12 +137,24 @@ class RunResult:
     extraction_ok: bool = False
     error: str = ""
     verilog_snippet: str = ""
+    # full transcript fields
+    task_prompt: str = ""
+    raw_response: str = ""
+    extracted_verilog: str = ""
+    sim_stdout: str = ""
+    sim_stderr: str = ""
+    timestamp: str = ""
 
 
 def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunResult:
-    result = RunResult(model=model, task=task_name)
+    result = RunResult(
+        model=model,
+        task=task_name,
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
     task = TASK_REGISTRY[task_name]
     result.baseline = float(task.baseline_cycles)
+    result.task_prompt = task.prompt
 
     t0 = time.monotonic()
     try:
@@ -149,6 +164,7 @@ def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunR
         result.api_latency_s = time.monotonic() - t0
         return result
     result.api_latency_s = time.monotonic() - t0
+    result.raw_response = raw_response
     result.prompt_tokens = usage.get("prompt_tokens", 0)
     result.completion_tokens = usage.get("completion_tokens", 0)
 
@@ -158,6 +174,7 @@ def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunR
         result.verilog_snippet = raw_response[:300]
         return result
     result.extraction_ok = True
+    result.extracted_verilog = verilog
     result.verilog_snippet = verilog[:200]
 
     workdir = Path(tempfile.mkdtemp(prefix="vibe_"))
@@ -168,9 +185,129 @@ def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunR
     result.verdict = obs.verdict.value
     result.score = obs.score
     result.raw_cycles = obs.raw_metric
+    result.sim_stdout = obs.stdout
+    result.sim_stderr = obs.stderr
     if obs.verdict != Verdict.OK and obs.stderr:
         result.error = obs.stderr[:200]
     return result
+
+
+VERDICT_EMOJI = {
+    "ok": "✅",
+    "compile_error": "🔴",
+    "incorrect": "❌",
+    "timeout": "⏱️",
+    "forbidden": "🚫",
+    "API_ERROR": "🌐",
+}
+
+
+def write_transcript(r: RunResult, out_dir: Path) -> Path:
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", r.model)
+    fname = out_dir / f"{r.timestamp[:10]}_{slug}_{r.task}.md"
+
+    emoji = VERDICT_EMOJI.get(r.verdict, "❓")
+    score_str = f"{r.score:.3f}" if r.score else "0.000"
+    cycles_str = f"{r.raw_cycles:.0f}" if r.raw_cycles is not None else "—"
+    baseline_str = f"{r.baseline:.0f}" if r.baseline is not None else "—"
+    tok_str = f"{r.prompt_tokens + r.completion_tokens}" if r.prompt_tokens or r.completion_tokens else "—"
+
+    lines: list[str] = []
+
+    lines += [
+        f"# {emoji} {r.model} — {r.task}",
+        "",
+        f"> **Verdict:** `{r.verdict}`  **Score:** `{score_str}`  "
+        f"**Cycles:** `{cycles_str}` / `{baseline_str}` baseline  "
+        f"**API:** `{r.api_latency_s:.1f}s`  **Tokens:** `{tok_str}`",
+        f"> Timestamp: `{r.timestamp}`  Seed: `42`",
+        "",
+        "---",
+        "",
+    ]
+
+    lines += [
+        "## Prompt",
+        "",
+        "**System:**",
+        "```",
+        SYSTEM_PROMPT,
+        "```",
+        "",
+        "**User:**",
+        "```",
+        r.task_prompt.strip(),
+        "```",
+        "",
+        "---",
+        "",
+    ]
+
+    lines += [
+        "## Model response",
+        "",
+    ]
+    if r.raw_response:
+        lines += [r.raw_response, ""]
+    else:
+        lines += ["*(no response — API error)*", ""]
+
+    lines += ["---", ""]
+
+    if r.extracted_verilog:
+        lines += [
+            "## Extracted Verilog",
+            "",
+            "```verilog",
+            r.extracted_verilog,
+            "```",
+            "",
+            "---",
+            "",
+        ]
+    elif not r.extraction_ok:
+        lines += [
+            "## Extracted Verilog",
+            "",
+            "⚠️ **Extraction failed** — no `module dut` found in response.",
+            "",
+            "---",
+            "",
+        ]
+
+    lines += [
+        "## Simulation result",
+        "",
+        f"**Verdict:** `{r.verdict}`",
+        "",
+    ]
+    if r.sim_stdout:
+        lines += [
+            "**Simulator stdout:**",
+            "```",
+            r.sim_stdout.strip(),
+            "```",
+            "",
+        ]
+    if r.sim_stderr:
+        lines += [
+            "**Simulator stderr / errors:**",
+            "```",
+            r.sim_stderr.strip(),
+            "```",
+            "",
+        ]
+    if r.error and not r.sim_stderr:
+        lines += [
+            "**Error:**",
+            "```",
+            r.error,
+            "```",
+            "",
+        ]
+
+    fname.write_text("\n".join(lines), encoding="utf-8")
+    return fname
 
 
 def print_table(results: list[RunResult]) -> None:
@@ -224,6 +361,7 @@ def main():
     parser.add_argument("--models", type=str, default=None, help="Comma-separated model list")
     parser.add_argument("--tasks", type=str, default=None, help="Comma-separated task list")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-transcripts", action="store_true", help="Skip writing markdown transcripts")
     args = parser.parse_args()
 
     models = args.models.split(",") if args.models else MODELS
@@ -236,6 +374,10 @@ def main():
     print(f"Seed:   {args.seed}")
     print(f"Total runs: {len(models) * len(tasks)}")
 
+    write_md = not args.no_transcripts
+    if write_md:
+        TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+
     results: list[RunResult] = []
     for model in models:
         for task_name in tasks:
@@ -246,6 +388,9 @@ def main():
             if r.error:
                 status += f" err={r.error[:60]}"
             print(f"  -> {status}")
+            if write_md:
+                path = write_transcript(r, TRANSCRIPTS_DIR)
+                print(f"  -> transcript: {path.relative_to(PROJECT_ROOT)}")
 
     print_table(results)
     print_summary(results)
