@@ -8,8 +8,8 @@ ways:
     * Docker / UV via OpenEnv's provider system.
 
 Every task returns a reward in [0, 1] using hierarchical-gate scoring: compile
-and correctness failures score 0; valid submissions are scored by a sigmoid
-over (baseline_cycles - measured_cycles).
+and correctness failures score 0; valid submissions are scored by a ratio
+formula S = baseline / (baseline + measured).
 """
 
 from rlvr_envs.core.models import (

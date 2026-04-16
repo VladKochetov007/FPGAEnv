@@ -17,7 +17,6 @@ from rlvr_envs.envs.fpga.models import FPGAAction, FPGAObservation
 
 env = FPGAEnvironment(
     default_task=os.environ.get("FPGA_DEFAULT_TASK", "popcount32"),
-    scoring_k=float(os.environ.get("FPGA_SCORING_K", "0.01")),
 )
 
 app = create_app(env, action_cls=FPGAAction, observation_cls=FPGAObservation)
