@@ -57,19 +57,55 @@ If any stage fails, the verdict maps to the appropriate category (COMPILE_ERROR,
 
 ## Scoring
 
+### Full formula
+
 ```
-S = baseline / (baseline + measured)
+         ⎧ 0                                   if verdict ≠ OK
+S(code) = ⎨
+         ⎩ baseline / (baseline + measured)    if verdict = OK
 ```
 
-| Property | Value |
-|----------|-------|
-| At baseline | S = 0.5 |
-| Measured -> 0 (perfect) | S -> 1.0 |
-| Measured -> inf (terrible) | S -> 0.0 |
-| Scale-invariant | same ratio = same score regardless of absolute values |
-| Tuning parameters | none |
+`measured` is the **total clock cycles** summed across all test cases for the submission. `baseline` is the same metric for a handwritten reference implementation of the same algorithm.
 
-Baselines come from handwritten reference implementations (shift-and-add multiplier, binary GCD, bit-serial CRC, etc.) in `references.py`. A combinational solution that finishes in 1 cycle/case scores close to 1.0; a solution matching the reference scores 0.5.
+### Properties
+
+The formula is a harmonic ratio. Substituting `r = measured / baseline` (the cycle ratio):
+
+```
+S = 1 / (1 + r)
+```
+
+| r (measured / baseline) | S | Meaning |
+|-------------------------|---|---------|
+| 0 | 1.000 | Instant / combinational |
+| 0.06 | 0.943 | 17× faster than reference |
+| 0.33 | 0.750 | 3× faster |
+| 1.00 | 0.500 | Matches reference exactly |
+| 2.00 | 0.333 | 2× slower |
+| 10.0 | 0.091 | 10× slower |
+| ∞ | 0.000 | Never finishes |
+
+Key properties:
+- **S = 0.5 is the baseline**: a solution that matches the reference gets exactly 0.5
+- **Smooth gradient everywhere**: no cliff around the baseline, GRPO sees a useful signal at every performance level
+- **Scale-invariant**: only the ratio `measured/baseline` matters, not the absolute cycle count — a 1-cycle task and a 10 000-cycle task have identical score curves relative to their baselines
+- **No tuning parameter**: previous sigmoid formula `sigmoid(k × (baseline − measured))` required choosing `k`; this formula has none
+- **Non-symmetric**: halving cycles (+0.25 score) is harder to achieve than doubling cycles (−0.17 score), which mirrors real hardware effort
+
+### Baselines
+
+Each baseline is measured by simulating the handwritten reference Verilog from `references.py` on the default seed-0 vector set. Examples:
+
+| Task | Reference algorithm | Cycles/case | Total (32 cases) |
+|------|--------------------|-----------:|----------------:|
+| popcount32 | Shift-and-count, 33 cy | 33 | 1056 |
+| mul8 | Shift-and-add, 9 cy | 9 | 288 |
+| xor_cipher16 | Combinational XOR, 1 cy | 1 | 31 |
+| div16 | Restoring division, 18 cy | ~18 | 450 |
+
+Combinational solutions (done asserts on the same cycle as start) score around 0.94–0.97 depending on the 1-cycle overhead from the testbench's reset drain.
+
+Baselines come from handwritten reference implementations in `references.py`.
 
 ## Tasks
 
