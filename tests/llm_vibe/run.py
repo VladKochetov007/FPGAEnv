@@ -33,11 +33,10 @@ from rlvr_envs.envs.fpga.tasks import TASK_REGISTRY
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODELS = [
-    "google/gemma-3-27b-it",
-    "mistralai/mistral-nemo",
-    "meta-llama/llama-3.1-8b-instruct",
-    "microsoft/phi-4",
-    "qwen/qwen-2.5-7b-instruct",
+    "deepseek/deepseek-v3.2",
+    "google/gemini-2.0-flash-001",
+    "openai/gpt-4.1-nano",
+    "qwen/qwen-2.5-72b-instruct",
 ]
 
 TASKS = ["popcount32", "xor_cipher16", "mul8", "bitrev16"]
@@ -63,7 +62,9 @@ def load_api_key() -> str:
     return key
 
 
-def extract_verilog(response_text: str) -> Optional[str]:
+def extract_verilog(response_text: Optional[str]) -> Optional[str]:
+    if response_text is None:
+        return None
     patterns = [
         r"```verilog\s*\n(.*?)```",
         r"```v\s*\n(.*?)```",
@@ -110,7 +111,10 @@ def call_openrouter(
             resp.raise_for_status()
             data = resp.json()
 
-        content = data["choices"][0]["message"]["content"]
+        msg = data["choices"][0]["message"]
+        content = msg.get("content") or ""
+        if not content and "reasoning" in msg:
+            content = msg["reasoning"]
         usage = data.get("usage", {})
         return content, usage
     raise RuntimeError(f"rate limited after {max_retries} retries")
