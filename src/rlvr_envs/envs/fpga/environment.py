@@ -15,7 +15,6 @@ we read `data_out`/`done` directly on the DUT pins.
 
 from __future__ import annotations
 
-import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -27,21 +26,8 @@ from rlvr_envs.core.scoring import ScoringConfig, score_submission
 from rlvr_envs.envs.fpga.harness import render_harness
 from rlvr_envs.envs.fpga.models import FPGATask
 from rlvr_envs.envs.fpga.tasks import TASK_REGISTRY, get_task
+from rlvr_envs.envs.fpga.verilog_guard import check_verilog
 from rlvr_envs.envs.fpga.verilator import build, lint, parse_sim_output, run_sim
-
-
-# Minimal Verilog-level reward-hack guard. These are blunt string checks, not a
-# full parser; belt-and-braces because the testbench reads DUT *pins*, not any
-# $display-written value, so most attacks cannot affect correctness anyway.
-_FORBIDDEN_TOKENS = (
-    "$system",
-    "$fopen",
-    "$readmemh",
-    "$readmemb",
-    "$fflush",
-    "`include",
-)
-_TOP_MODULE_RE = re.compile(r"\bmodule\s+dut\b")
 
 
 class FPGAEnvironment(RLVREnvironment[FPGATask]):
@@ -84,19 +70,14 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
     ) -> GradingResult:
         source = action.source
 
-        # Static Verilog-level guard (defense in depth, not a real sandbox).
-        if _TOP_MODULE_RE.search(source) is None:
+        guard = check_verilog(source)
+        if not guard.ok:
+            verdict = Verdict.COMPILE_ERROR if "missing `module dut`" in guard.blocked else Verdict.FORBIDDEN
             return GradingResult(
-                verdict=Verdict.COMPILE_ERROR,
+                verdict=verdict,
                 score=0.0,
-                stderr="module `dut` not found in submission",
-            )
-        hits = [tok for tok in _FORBIDDEN_TOKENS if tok in source]
-        if hits:
-            return GradingResult(
-                verdict=Verdict.FORBIDDEN,
-                score=0.0,
-                stderr=f"forbidden Verilog construct(s): {hits}",
+                stderr=f"blocked: {guard.blocked}",
+                details={"warnings": guard.warnings},
             )
 
         ep_root = Path(tempfile.mkdtemp(prefix="ep_", dir=str(self._workdir)))
