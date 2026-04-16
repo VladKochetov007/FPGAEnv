@@ -96,13 +96,16 @@ def run_sim(
     sandbox: Sandbox,
     *,
     cwd: Path,
+    vectors_path: Path,
     wall_seconds: float = 30.0,
 ) -> SandboxResult:
-    """Execute the compiled simulator; expects ./obj_dir/Vdut."""
+    """Execute the compiled simulator with the given vectors binary."""
     binary = cwd / "obj_dir" / "Vdut"
-    return sandbox.run([str(binary)], cwd=cwd,
-                       limits=SandboxLimits(wall_seconds=wall_seconds,
-                                            cpu_seconds=wall_seconds))
+    return sandbox.run(
+        [str(binary), str(vectors_path)],
+        cwd=cwd,
+        limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds),
+    )
 
 
 _CASE_RE = re.compile(r"^CASE (\d+) (\d+) 0x[0-9a-fA-F]+$", re.MULTILINE)

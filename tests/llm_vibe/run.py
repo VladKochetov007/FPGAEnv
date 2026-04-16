@@ -178,7 +178,7 @@ def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunR
     result.verilog_snippet = verilog[:200]
 
     workdir = Path(tempfile.mkdtemp(prefix="vibe_"))
-    env = FPGAEnvironment(sandbox=SubprocessSandbox(), workdir=workdir)
+    env = FPGAEnvironment(sandbox=SubprocessSandbox(), workdir=workdir, n_validation_seeds=2)
     env.reset(seed=seed, task_id=task_name)
     obs = env.step(SubmissionAction(source=verilog))
 

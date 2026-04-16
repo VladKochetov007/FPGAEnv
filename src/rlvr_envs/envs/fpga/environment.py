@@ -1,31 +1,35 @@
-"""FPGA environment: lint -> build -> simulate -> score.
+"""FPGA environment: lint -> build -> simulate (multi-seed) -> score.
 
-The grading pipeline is three sandbox-isolated stages with a hard gate at each:
+Grading pipeline:
 
-    lint (verilator --lint-only)   ~  catches syntax + structural issues fast
-    build (verilator --cc --exe --build)
-    run  (./obj_dir/Vdut)          ~  harness prints CASE/TOTAL_CYCLES/OK
+    lint  (verilator --lint-only)        fast syntax + structure check
+    build (verilator --cc --exe --build) compile DUT + generated harness
+    sim   (./obj_dir/Vdut vectors.bin)   run against test vectors
 
-If any stage fails, verdict maps to the appropriate category; only on `OK` is
-a sigmoid-over-cycles score computed. We also ban a few tell-tale reward-hack
-tokens (system calls, direct `$display`-based result fabrication) via a tiny
-pre-check; the testbench design makes most hacks uninteresting anyway because
-we read `data_out`/`done` directly on the DUT pins.
+Vectors are a separate binary file loaded at runtime, so a single compiled
+binary can be re-tested against N different seeds without recompiling.
+With n_validation_seeds > 0, the submission runs on the primary seed plus that
+many additional seeds.  Score is the mean across all seeds; if any validation
+seed produces INCORRECT/TIMEOUT, the overall verdict is INCORRECT (score 0).
+
+This defeats the most common reward-hacking strategy: a model that memorises
+the training-seed vectors and hardcodes them in an `initial` ROM will fail every
+validation seed it has never seen.
 """
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from rlvr_envs.core.base_env import GradingResult, RLVREnvironment
 from rlvr_envs.core.models import SubmissionAction, Verdict
 from rlvr_envs.core.sandbox import Sandbox, SubprocessSandbox
 from rlvr_envs.core.scoring import ScoringConfig, score_submission
-from rlvr_envs.envs.fpga.harness import render_harness
+from rlvr_envs.envs.fpga.harness import render_harness, write_vectors_bin
 from rlvr_envs.envs.fpga.models import FPGATask
-from rlvr_envs.envs.fpga.tasks import TASK_REGISTRY, get_task
+from rlvr_envs.envs.fpga.tasks import get_task
 from rlvr_envs.envs.fpga.verilog_guard import check_verilog
 from rlvr_envs.envs.fpga.verilator import build, lint, parse_sim_output, run_sim
 
@@ -39,12 +43,14 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
         default_task: str = "popcount32",
         sandbox: Optional[Sandbox] = None,
         workdir: Optional[Path] = None,
+        n_validation_seeds: int = 0,
     ) -> None:
         super().__init__()
         self._default_task = default_task
         self._sandbox = sandbox or SubprocessSandbox()
         self._workdir = workdir or Path(tempfile.gettempdir()) / "rlvr_fpga"
         self._workdir.mkdir(parents=True, exist_ok=True)
+        self._n_validation_seeds = n_validation_seeds
 
     # ---- RLVREnvironment hooks -------------------------------------------------
 
@@ -82,9 +88,7 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
         try:
             return self._run_pipeline(source, task, ep_root, timeout_s)
         finally:
-            # Keep obj_dir for debugging on failure only; clean on success.
-            # (Tests mock the sandbox so they never hit this branch.)
-            pass  # tempdir cleanup left to OS/cron to avoid stepping on concurrent runs
+            pass
 
     # ---- Pipeline -------------------------------------------------------------
 
@@ -113,9 +117,7 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
                 details={"stage": "lint"},
             )
 
-        vectors = task.vectors(self._seed)
-        harness = render_harness(task, vectors)
-        (ep_root / "vectors.h").write_text(harness.vectors_h)
+        harness = render_harness(task)
         tb_path = ep_root / "sim_main.cpp"
         tb_path.write_text(harness.tb_cpp)
 
@@ -135,53 +137,92 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
                 details={"stage": "build"},
             )
 
-        sim_res = run_sim(
-            self._sandbox,
-            cwd=ep_root,
-            wall_seconds=_cap(timeout_s, 30.0),
-        )
-        if sim_res.timed_out:
-            return GradingResult(
-                verdict=Verdict.TIMEOUT,
-                score=0.0,
-                stdout=sim_res.stdout,
-                stderr=sim_res.stderr,
-                details={"stage": "run"},
-            )
+        seeds = _validation_seeds(self._seed, self._n_validation_seeds)
+        return self._run_multi_seed(task, ep_root, seeds, timeout_s)
 
-        report = parse_sim_output(sim_res.stdout)
-        if report.timed_out:
-            return GradingResult(
-                verdict=Verdict.TIMEOUT,
-                score=0.0,
-                stdout=sim_res.stdout,
-                details={"stage": "harness-timeout"},
-            )
-        if report.incorrect_case is not None or not report.ok:
-            return GradingResult(
-                verdict=Verdict.INCORRECT,
-                score=0.0,
-                stdout=sim_res.stdout,
-                details={
-                    "stage": "run",
-                    "incorrect_case": report.incorrect_case,
-                    "per_case_cycles": report.per_case_cycles,
-                },
-            )
-
-        total = report.total_cycles or 0
+    def _run_multi_seed(
+        self,
+        task: FPGATask,
+        ep_root: Path,
+        seeds: List[int],
+        timeout_s: Optional[float],
+    ) -> GradingResult:
         config = ScoringConfig(baseline=float(task.baseline_cycles))
-        score = score_submission(Verdict.OK, float(total), config)
+        seed_scores: List[float] = []
+        primary_stdout = ""
+        primary_stderr = ""
+        primary_report = None
+
+        for i, seed in enumerate(seeds):
+            vectors = task.vectors(seed)
+            vbin = ep_root / f"vectors_{seed}.bin"
+            write_vectors_bin(task, vectors, vbin)
+
+            sim_res = run_sim(
+                self._sandbox,
+                cwd=ep_root,
+                vectors_path=vbin,
+                wall_seconds=_cap(timeout_s, 30.0),
+            )
+
+            if i == 0:
+                primary_stdout = sim_res.stdout
+                primary_stderr = sim_res.stderr
+
+            if sim_res.timed_out:
+                return GradingResult(
+                    verdict=Verdict.TIMEOUT,
+                    score=0.0,
+                    stdout=sim_res.stdout,
+                    stderr=sim_res.stderr,
+                    details={"stage": "run", "seed": seed},
+                )
+
+            report = parse_sim_output(sim_res.stdout)
+
+            if i == 0:
+                primary_report = report
+
+            if report.timed_out:
+                return GradingResult(
+                    verdict=Verdict.TIMEOUT,
+                    score=0.0,
+                    stdout=sim_res.stdout,
+                    details={"stage": "harness-timeout", "seed": seed},
+                )
+
+            if report.incorrect_case is not None or not report.ok:
+                # Primary seed failure: report normally.
+                # Validation seed failure: report as INCORRECT so trainer knows.
+                return GradingResult(
+                    verdict=Verdict.INCORRECT,
+                    score=0.0,
+                    stdout=sim_res.stdout,
+                    details={
+                        "stage": "run",
+                        "seed": seed,
+                        "validation_seed": i > 0,
+                        "incorrect_case": report.incorrect_case,
+                        "per_case_cycles": report.per_case_cycles,
+                    },
+                )
+
+            total = report.total_cycles or 0
+            seed_scores.append(score_submission(Verdict.OK, float(total), config))
+
+        mean_score = sum(seed_scores) / len(seed_scores)
+        primary_cycles = primary_report.total_cycles if primary_report else None
         return GradingResult(
             verdict=Verdict.OK,
-            score=score,
-            raw_metric=float(total),
+            score=mean_score,
+            raw_metric=float(primary_cycles) if primary_cycles is not None else None,
             baseline_metric=float(task.baseline_cycles),
-            stdout=sim_res.stdout,
+            stdout=primary_stdout,
             details={
                 "stage": "run",
-                "per_case_cycles": report.per_case_cycles,
-                "n_cases": len(vectors),
+                "seeds": seeds,
+                "per_seed_scores": seed_scores,
+                "n_cases": len(task.vectors(seeds[0])),
             },
         )
 
@@ -189,4 +230,9 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
 def _cap(user: Optional[float], default: float) -> float:
     if user is None:
         return default
-    return float(min(user, default * 4))  # hard ceiling — never block trainer indefinitely
+    return float(min(user, default * 4))
+
+
+def _validation_seeds(primary: int, n: int) -> List[int]:
+    """Primary seed plus n additional seeds derived from it."""
+    return [primary] + [primary + i + 1 for i in range(n)]

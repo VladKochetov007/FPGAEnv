@@ -1,7 +1,7 @@
 # ✅ anthropic/claude-sonnet-4.6 — mul8
 
-> **Verdict:** `ok`  **Score:** `0.900`  **Cycles:** `32` / `288` baseline  **API:** `3.3s`  **Tokens:** `407`
-> Timestamp: `2026-04-16T18:32:39Z`  Seed: `42`
+> **Verdict:** `ok`  **Score:** `0.900`  **Cycles:** `32` / `288` baseline  **API:** `2.7s`  **Tokens:** `407`
+> Timestamp: `2026-04-16T18:49:39Z`  Seed: `42`
 
 ---
 
