@@ -18,7 +18,7 @@ from rlvr_envs.core.models import (
     SubmissionState,
     Verdict,
 )
-from rlvr_envs.core.scoring import ScoringConfig, score_submission, sigmoid_speed_score
+from rlvr_envs.core.scoring import ScoringConfig, score_submission, speed_score
 
 __all__ = [
     "SubmissionAction",
@@ -27,5 +27,5 @@ __all__ = [
     "Verdict",
     "ScoringConfig",
     "score_submission",
-    "sigmoid_speed_score",
+    "speed_score",
 ]

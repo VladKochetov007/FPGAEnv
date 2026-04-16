@@ -105,7 +105,6 @@ def e2e_env():
     return FPGAEnvironment(
         sandbox=SubprocessSandbox(),
         workdir=workdir,
-        scoring_k=0.01,
     )
 
 

@@ -167,7 +167,7 @@ endmodule
         env = FPGAEnvironment(
             sandbox=SubprocessSandbox(),
             workdir=Path(tempfile.mkdtemp()),
-            scoring_k=0.01,
+
         )
         env.reset(seed=999, task_id="xor_cipher16")
         obs = env.step(SubmissionAction(source=source))
@@ -217,7 +217,7 @@ endmodule
         env = FPGAEnvironment(
             sandbox=SubprocessSandbox(),
             workdir=Path(tempfile.mkdtemp()),
-            scoring_k=0.01,
+
         )
         env.reset(seed=42, task_id="xor_cipher16")
         obs = env.step(SubmissionAction(source=source))

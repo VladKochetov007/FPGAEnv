@@ -39,14 +39,12 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
         default_task: str = "popcount32",
         sandbox: Optional[Sandbox] = None,
         workdir: Optional[Path] = None,
-        scoring_k: float = 0.01,
     ) -> None:
         super().__init__()
         self._default_task = default_task
         self._sandbox = sandbox or SubprocessSandbox()
         self._workdir = workdir or Path(tempfile.gettempdir()) / "rlvr_fpga"
         self._workdir.mkdir(parents=True, exist_ok=True)
-        self._scoring_k = scoring_k
 
     # ---- RLVREnvironment hooks -------------------------------------------------
 
@@ -172,7 +170,7 @@ class FPGAEnvironment(RLVREnvironment[FPGATask]):
             )
 
         total = report.total_cycles or 0
-        config = ScoringConfig(baseline=float(task.baseline_cycles), k=self._scoring_k)
+        config = ScoringConfig(baseline=float(task.baseline_cycles))
         score = score_submission(Verdict.OK, float(total), config)
         return GradingResult(
             verdict=Verdict.OK,

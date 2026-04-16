@@ -169,7 +169,7 @@ class TestScoringIntegration:
             _ok_result(),
             _ok_result(stdout=fast_stdout),
         ])
-        env = FPGAEnvironment(sandbox=mock, workdir=Path(tempfile.mkdtemp()), scoring_k=0.01)
+        env = FPGAEnvironment(sandbox=mock, workdir=Path(tempfile.mkdtemp()))
         env.reset(seed=0, task_id="popcount32")
         obs = env.step(SubmissionAction(source=CLEAN_VERILOG))
         assert obs.verdict == Verdict.OK
@@ -186,7 +186,7 @@ class TestScoringIntegration:
             _ok_result(),
             _ok_result(stdout=slow_stdout),
         ])
-        env = FPGAEnvironment(sandbox=mock, workdir=Path(tempfile.mkdtemp()), scoring_k=0.01)
+        env = FPGAEnvironment(sandbox=mock, workdir=Path(tempfile.mkdtemp()))
         env.reset(seed=0, task_id="popcount32")
         obs = env.step(SubmissionAction(source=CLEAN_VERILOG))
         assert obs.verdict == Verdict.OK
