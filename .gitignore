@@ -19,3 +19,4 @@ obj_dir/
 *.swp
 scratch/
 .ipynb_checkpoints/
+.env
