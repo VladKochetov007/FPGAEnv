@@ -101,12 +101,18 @@ BLOCKED_DEFAULT: Sequence[str] = (
     "wait",
     "force",
     "release",
-)
 
-WARNED_DEFAULT: Sequence[str] = (
+    # Tier 6: stdout manipulation. Even though the parser only trusts
+    # `@@H@@`-prefixed lines, a DUT that spams `$display` from a
+    # combinational always block can fill the sandbox's 4 MiB output buffer
+    # and push the harness's own INCORRECT/TIMEOUT lines past truncation.
+    # Blocking these is cheap: no legitimate RTL needs to print.
     "$display",
     "$write",
     "$monitor",
+)
+
+WARNED_DEFAULT: Sequence[str] = (
     "`define",
     "`ifdef",
     "`ifndef",

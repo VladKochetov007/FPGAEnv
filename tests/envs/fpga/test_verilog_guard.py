@@ -179,12 +179,11 @@ class TestWarnedTokens:
         assert result.ok
         assert token in result.warnings
 
-    def test_display_warned_not_blocked(self):
+    def test_display_blocked(self):
         source = 'module dut(); always @(*) $display("hello"); endmodule'
         result = check_verilog(source)
-        assert result.ok
-        assert "$display" in result.warnings
-        assert len(result.blocked) == 0
+        assert not result.ok
+        assert "$display" in result.blocked
 
 
 class TestMissingModuleDut:
@@ -228,11 +227,11 @@ class TestMultipleViolations:
         assert len(result.blocked) == 2
 
     def test_mixed_blocked_and_warned(self):
-        source = 'module dut(); $system("x"); $display("y"); endmodule'
+        source = 'module dut(); $system("x"); `define FOO 1\nendmodule'
         result = check_verilog(source)
         assert not result.ok
         assert "$system" in result.blocked
-        assert "$display" in result.warnings
+        assert "`define" in result.warnings
 
 
 class TestCustomRules:

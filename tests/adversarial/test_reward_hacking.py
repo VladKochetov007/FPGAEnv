@@ -99,8 +99,11 @@ endmodule
         assert obs.verdict == Verdict.FORBIDDEN
 
 
-class TestDisplayWarningButNotBlocked:
-    def test_display_with_correct_logic_ok(self):
+class TestDisplayBlocked:
+    def test_display_blocked_even_with_correct_logic(self):
+        """$display is blocked: a DUT can otherwise flood stdout from a
+        combinational always block and push the harness's own INCORRECT
+        line past the sandbox's output-size truncation."""
         source = """\
 module dut(input clk, rst, start, input [31:0] data_in, output reg [5:0] data_out, output reg done);
     integer i;
@@ -122,15 +125,10 @@ module dut(input clk, rst, start, input [31:0] data_in, output reg [5:0] data_ou
     end
 endmodule
 """
-        mock = MockSandbox([
-            _ok_result(),
-            _ok_result(),
-            _ok_result(stdout=OK_SIM_STDOUT),
-        ])
-        env = FPGAEnvironment(sandbox=mock, workdir=Path(tempfile.mkdtemp()))
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
         env.reset(seed=0, task_id="popcount32")
         obs = env.step(SubmissionAction(source=source))
-        assert obs.verdict == Verdict.OK
+        assert obs.verdict == Verdict.FORBIDDEN
 
 
 class TestHardcodedOutputsFail:

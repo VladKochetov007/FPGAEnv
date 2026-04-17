@@ -146,6 +146,8 @@ Defenses layered in order of threat severity:
    - **Filesystem / sideband IO**: `$system`, `$fopen`/`$fclose`/`$fread`/`$fwrite`/`$fscanf`/`$fflush`, `$readmemh`/`$readmemb`, `$dumpfile`/`$dumpvars`, `` `include ``.
    - **Env introspection & early exit**: `$test$plusargs`, `$value$plusargs`, `$random`, `$urandom`, `$time`, `$stime`, `$realtime`, `$finish`, `$stop`.
    - **Memorisation via pre-init**: `initial` blocks (would allow answer ROMs; synchronous reset is sufficient for legitimate designs).
+   - **Non-synthesisable constructs**: `fork`/`join`/`join_any`/`join_none`, `wait`, `force`, `release` (score only reflects real hardware behaviour).
+   - **Stdout manipulation**: `$display`/`$write`/`$monitor` (a DUT spamming stdout from a combinational always block can push the harness's INCORRECT line past the sandbox's 4 MiB truncation).
 2. **Multi-seed validation** -- submission runs on the primary seed plus N extra seeds. Any INCORRECT / TIMEOUT on *any* seed returns score 0. Defeats seed-memorisation: a ROM of the training vectors will miss every unseen seed.
 3. **Reset between cases** -- harness pulses `rst` for 3 cycles before every test case, not once at startup. Kills the "online FSM memorisation" attack where a DUT accumulates hidden state across cases to predict future inputs.
 4. **Prefixed harness output** -- harness prints `@@H@@CASE`, `@@H@@OK`, `@@H@@INCORRECT`, etc. Parser requires the prefix, so a submission that sneaks a `$display("OK")` past the WARNED filter cannot fool the scorer.
