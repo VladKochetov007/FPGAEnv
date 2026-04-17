@@ -139,6 +139,9 @@ module dut(
 
 ## Anti-reward-hack defenses
 
+Full threat model, attack examples, and known-weak areas:
+**[docs/reward-hacking.md](docs/reward-hacking.md)**.
+
 Defenses layered in order of threat severity:
 
 1. **Static guard** (`verilog_guard.py`) -- tokens rejected before Verilator ever sees them.
