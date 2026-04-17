@@ -139,10 +139,19 @@ module dut(
 
 ## Anti-reward-hack defenses
 
-1. **Verilog guard** -- blocks `$system`, `$fopen`, `$readmemh`, `$readmemb`, `` `include `` before compilation
-2. **Pin-level checking** -- testbench reads `data_out`/`done` directly from DUT pins, not stdout
-3. **Randomized vectors** -- test vectors are seeded per episode, hardcoded lookup tables fail on different seeds
-4. **Sandbox isolation** -- wall-clock, CPU, memory limits via `setrlimit` + SIGKILL
+Defenses layered in order of threat severity:
+
+1. **Static guard** (`verilog_guard.py`) -- tokens rejected before Verilator ever sees them.
+   - **Sandbox escape**: `import "DPI-C"`, `export "DPI-C"`, `$c(...)`, `bind` (all allow arbitrary C execution inside the simulator).
+   - **Filesystem / sideband IO**: `$system`, `$fopen`/`$fclose`/`$fread`/`$fwrite`/`$fscanf`/`$fflush`, `$readmemh`/`$readmemb`, `$dumpfile`/`$dumpvars`, `` `include ``.
+   - **Env introspection & early exit**: `$test$plusargs`, `$value$plusargs`, `$random`, `$urandom`, `$time`, `$stime`, `$realtime`, `$finish`, `$stop`.
+   - **Memorisation via pre-init**: `initial` blocks (would allow answer ROMs; synchronous reset is sufficient for legitimate designs).
+2. **Multi-seed validation** -- submission runs on the primary seed plus N extra seeds. Any INCORRECT / TIMEOUT on *any* seed returns score 0. Defeats seed-memorisation: a ROM of the training vectors will miss every unseen seed.
+3. **Reset between cases** -- harness pulses `rst` for 3 cycles before every test case, not once at startup. Kills the "online FSM memorisation" attack where a DUT accumulates hidden state across cases to predict future inputs.
+4. **Prefixed harness output** -- harness prints `@@H@@CASE`, `@@H@@OK`, `@@H@@INCORRECT`, etc. Parser requires the prefix, so a submission that sneaks a `$display("OK")` past the WARNED filter cannot fool the scorer.
+5. **Pin-level checking** -- the testbench reads `data_out`/`done` straight from DUT pins. Stdout never enters the correctness decision.
+6. **Runtime-loaded vectors** -- vectors live in a separate `.bin` file passed as argv[1]. The compiled binary is not specialised to any particular seed, so the same build can be replayed against N seeds cheaply (enables 2 above).
+7. **Sandbox isolation** -- wall-clock, CPU, memory limits via `setrlimit` + SIGKILL on the process group.
 
 ## Usage modes
 
