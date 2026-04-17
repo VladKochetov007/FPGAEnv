@@ -88,6 +88,19 @@ BLOCKED_DEFAULT: Sequence[str] = (
 
     # Tier 4: memorization via pre-initialised state.
     "initial",
+
+    # Tier 5: non-synthesisable / timing-cheat constructs. Fork/join let a
+    # submission spawn concurrent threads that only exist in simulation;
+    # wait/force/release let it drive signals in ways real hardware cannot.
+    # Allowing any of these means scoring a design that would never run on
+    # an FPGA.
+    "fork",
+    "join",
+    "join_any",
+    "join_none",
+    "wait",
+    "force",
+    "release",
 )
 
 WARNED_DEFAULT: Sequence[str] = (
@@ -100,8 +113,14 @@ WARNED_DEFAULT: Sequence[str] = (
 )
 
 _MODULE_DUT_RE = re.compile(r"\bmodule\s+dut\b")
-_INITIAL_RE = re.compile(r"\binitial\b")
 _BIND_RE = re.compile(r"\bbind\s+\w+")
+
+# Tokens that must match on word boundaries (they collide with common
+# identifiers like `fork_state`, `wait_cycles`, `initial_state`, ...).
+_WORD_KEYWORDS = frozenset({
+    "initial", "fork", "join", "join_any", "join_none",
+    "wait", "force", "release",
+})
 
 
 def check_verilog(
@@ -120,10 +139,8 @@ def check_verilog(
     found_warned: List[str] = []
 
     for tok in blocked:
-        if tok == "initial":
-            # Word-boundary match so identifiers containing "initial"
-            # (e.g. `initial_state`) do not false-positive.
-            if _INITIAL_RE.search(source):
+        if tok in _WORD_KEYWORDS:
+            if re.search(rf"\b{re.escape(tok)}\b", source):
                 found_blocked.append(tok)
         elif tok == "bind ":
             # Only match `bind <name>` — avoid hitting identifiers like `bind_req`.

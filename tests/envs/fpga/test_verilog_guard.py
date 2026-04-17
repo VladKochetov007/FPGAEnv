@@ -119,6 +119,33 @@ class TestEnvIntrospectionBlocked:
         assert "$dumpfile" in result.blocked
 
 
+class TestNonSynthesisableBlocked:
+    @pytest.mark.parametrize("tok", [
+        "fork", "join", "join_any", "join_none", "wait", "force", "release",
+    ])
+    def test_sim_only_keyword_blocked(self, tok):
+        source = f"module dut(); always @(*) begin {tok} foo; end endmodule"
+        result = check_verilog(source)
+        assert not result.ok
+        assert tok in result.blocked
+
+    @pytest.mark.parametrize("ident", [
+        "fork_state", "join_counter", "wait_cycles",
+        "force_reset", "release_req", "join_any_pending",
+    ])
+    def test_identifier_containing_keyword_not_blocked(self, ident):
+        source = (
+            "module dut(input clk, rst, start, input [31:0] data_in,\n"
+            "          output [5:0] data_out, output done);\n"
+            f"  reg [3:0] {ident};\n"
+            "  assign data_out = 6'd0; assign done = start;\n"
+            "endmodule\n"
+        )
+        result = check_verilog(source)
+        for bad in ("fork", "join", "wait", "force", "release"):
+            assert bad not in result.blocked
+
+
 class TestInitialBlocked:
     def test_initial_block_blocked(self):
         source = (
