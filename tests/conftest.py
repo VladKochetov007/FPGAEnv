@@ -34,11 +34,11 @@ def pytest_collection_modifyitems(config, items):
 def ok_sandbox_result() -> SandboxResult:
     """A mock sandbox result representing a successful harness run."""
     stdout = (
-        "CASE 0 1 0x00\n"
-        "CASE 1 1 0x20\n"
-        "CASE 2 1 0x10\n"
-        "TOTAL_CYCLES 3\n"
-        "OK\n"
+        "@@H@@CASE 0 1 0x00\n"
+        "@@H@@CASE 1 1 0x20\n"
+        "@@H@@CASE 2 1 0x10\n"
+        "@@H@@TOTAL_CYCLES 3\n"
+        "@@H@@OK\n"
     )
     return SandboxResult(returncode=0, stdout=stdout, stderr="", wall_seconds=0.1)
 
@@ -51,14 +51,14 @@ def compile_fail_sandbox_result() -> SandboxResult:
 @pytest.fixture
 def incorrect_sandbox_result() -> SandboxResult:
     stdout = (
-        "CASE 0 1 0xFF\n"
-        "INCORRECT 0 want=0x00 got=0xFF\n"
-        "TOTAL_CYCLES 1\n"
+        "@@H@@CASE 0 1 0xFF\n"
+        "@@H@@INCORRECT 0 want=0x00 got=0xFF\n"
+        "@@H@@TOTAL_CYCLES 1\n"
     )
     return SandboxResult(returncode=2, stdout=stdout, stderr="", wall_seconds=0.1)
 
 
 @pytest.fixture
 def timeout_sandbox_result() -> SandboxResult:
-    return SandboxResult(returncode=-9, stdout="TIMEOUT 0\nTOTAL_CYCLES 0\n",
+    return SandboxResult(returncode=-9, stdout="@@H@@TIMEOUT 0\n@@H@@TOTAL_CYCLES 0\n",
                          stderr="", wall_seconds=10.0, timed_out=True)

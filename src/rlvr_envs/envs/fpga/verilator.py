@@ -108,10 +108,14 @@ def run_sim(
     )
 
 
-_CASE_RE = re.compile(r"^CASE (\d+) (\d+) 0x[0-9a-fA-F]+$", re.MULTILINE)
-_TOTAL_RE = re.compile(r"^TOTAL_CYCLES (\d+)$", re.MULTILINE)
-_INCORRECT_RE = re.compile(r"^INCORRECT (\d+)", re.MULTILINE)
-_TIMEOUT_RE = re.compile(r"^TIMEOUT (\d+)", re.MULTILINE)
+# All harness lines are prefixed `@@H@@` so a submission that prints fake
+# CASE/OK/INCORRECT via `$display` cannot confuse the parser. Only lines
+# the harness itself emits are considered.
+_CASE_RE = re.compile(r"^@@H@@CASE (\d+) (\d+) 0x[0-9a-fA-F]+$", re.MULTILINE)
+_TOTAL_RE = re.compile(r"^@@H@@TOTAL_CYCLES (\d+)$", re.MULTILINE)
+_INCORRECT_RE = re.compile(r"^@@H@@INCORRECT (\d+)", re.MULTILINE)
+_TIMEOUT_RE = re.compile(r"^@@H@@TIMEOUT (\d+)", re.MULTILINE)
+_OK_RE = re.compile(r"^@@H@@OK$", re.MULTILINE)
 
 
 def parse_sim_output(stdout: str) -> SimReport:
@@ -120,7 +124,7 @@ def parse_sim_output(stdout: str) -> SimReport:
     timeout = _TIMEOUT_RE.search(stdout)
     total = _TOTAL_RE.search(stdout)
     per_case = [int(m.group(2)) for m in _CASE_RE.finditer(stdout)]
-    ok = "\nOK\n" in ("\n" + stdout + "\n") and incorrect is None and timeout is None
+    ok = _OK_RE.search(stdout) is not None and incorrect is None and timeout is None
     return SimReport(
         ok=ok,
         timed_out=timeout is not None,

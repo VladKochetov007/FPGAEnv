@@ -14,7 +14,7 @@ def _ok_result(stdout=""):
     return SandboxResult(returncode=0, stdout=stdout, stderr="", wall_seconds=0.1)
 
 
-OK_SIM_STDOUT = "CASE 0 1 0x00\nTOTAL_CYCLES 1\nOK\n"
+OK_SIM_STDOUT = "@@H@@CASE 0 1 0x00\n@@H@@TOTAL_CYCLES 1\n@@H@@OK\n"
 
 
 class TestGuardRejectsHackAttempts:
@@ -194,9 +194,11 @@ endmodule
         assert obs.verdict == Verdict.FORBIDDEN
 
 
-class TestInitialBlockWithRandomVectors:
-    @pytest.mark.verilator
-    def test_initial_preload_fails_on_random_vectors(self):
+class TestInitialBlockForbidden:
+    def test_initial_preload_forbidden_before_sim(self):
+        """`initial` is statically blocked by the guard — submission never
+        reaches the simulator. This closes the ROM-pre-load attack vector
+        at its earliest possible point."""
         source = """\
 module dut(input clk, rst, start, input [15:0] data_in, output reg [15:0] data_out, output reg done);
     reg [15:0] preloaded;
@@ -214,11 +216,26 @@ module dut(input clk, rst, start, input [15:0] data_in, output reg [15:0] data_o
     end
 endmodule
 """
-        env = FPGAEnvironment(
-            sandbox=SubprocessSandbox(),
-            workdir=Path(tempfile.mkdtemp()),
-
-        )
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
         env.reset(seed=42, task_id="xor_cipher16")
         obs = env.step(SubmissionAction(source=source))
-        assert obs.verdict == Verdict.INCORRECT
+        assert obs.verdict == Verdict.FORBIDDEN
+
+
+class TestSubmissionOutputInjection:
+    """A DUT that prints fake CASE/OK lines via $display cannot trick the
+    parser — harness lines are uniquely prefixed with @@H@@."""
+
+    def test_fake_ok_stdout_does_not_count_as_ok(self):
+        # Simulate: DUT $display'd an unprefixed OK, harness never actually
+        # ran to completion (e.g. crashed / SIGSEGV). No @@H@@OK → not OK.
+        from rlvr_envs.envs.fpga.verilator import parse_sim_output
+        fake_stdout = (
+            "CASE 0 1 0x0000\n"
+            "TOTAL_CYCLES 1\n"
+            "OK\n"  # unprefixed — submission's $display
+        )
+        report = parse_sim_output(fake_stdout)
+        assert not report.ok
+        assert report.total_cycles is None
+        assert report.per_case_cycles == []

@@ -23,11 +23,11 @@ endmodule
 """
 
 OK_SIM_STDOUT = (
-    "CASE 0 1 0x00\n"
-    "CASE 1 1 0x20\n"
-    "CASE 2 1 0x10\n"
-    "TOTAL_CYCLES 3\n"
-    "OK\n"
+    "@@H@@CASE 0 1 0x00\n"
+    "@@H@@CASE 1 1 0x20\n"
+    "@@H@@CASE 2 1 0x10\n"
+    "@@H@@TOTAL_CYCLES 3\n"
+    "@@H@@OK\n"
 )
 
 
@@ -41,13 +41,13 @@ def _fail_result(stderr="error"):
 
 def _timeout_result():
     return SandboxResult(
-        returncode=-9, stdout="TIMEOUT 0\nTOTAL_CYCLES 0\n",
+        returncode=-9, stdout="@@H@@TIMEOUT 0\n@@H@@TOTAL_CYCLES 0\n",
         stderr="", wall_seconds=10.0, timed_out=True,
     )
 
 
 def _incorrect_result():
-    stdout = "CASE 0 1 0xFF\nINCORRECT 0 want=0x00 got=0xFF\nTOTAL_CYCLES 1\n"
+    stdout = "@@H@@CASE 0 1 0xFF\n@@H@@INCORRECT 0 want=0x00 got=0xFF\n@@H@@TOTAL_CYCLES 1\n"
     return SandboxResult(returncode=2, stdout=stdout, stderr="", wall_seconds=0.1)
 
 
@@ -197,9 +197,9 @@ class TestResetAndStep:
 class TestScoringIntegration:
     def test_faster_than_baseline_scores_above_half(self):
         fast_stdout = (
-            "CASE 0 1 0x00\n"
-            "TOTAL_CYCLES 1\n"
-            "OK\n"
+            "@@H@@CASE 0 1 0x00\n"
+            "@@H@@TOTAL_CYCLES 1\n"
+            "@@H@@OK\n"
         )
         mock = MockSandbox([
             _ok_result(),
@@ -214,9 +214,9 @@ class TestScoringIntegration:
 
     def test_slower_than_baseline_scores_below_half(self):
         slow_stdout = (
-            "CASE 0 10000 0x00\n"
-            "TOTAL_CYCLES 10000\n"
-            "OK\n"
+            "@@H@@CASE 0 10000 0x00\n"
+            "@@H@@TOTAL_CYCLES 10000\n"
+            "@@H@@OK\n"
         )
         mock = MockSandbox([
             _ok_result(),

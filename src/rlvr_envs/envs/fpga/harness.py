@@ -126,8 +126,8 @@ int main(int argc, char** argv) {{
         }}
 
         if (!finished) {{
-            printf("TIMEOUT %zu\\n", c);
-            printf("TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
+            printf("@@H@@TIMEOUT %zu\\n", c);
+            printf("@@H@@TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
             free(cases);
             return 1;
         }}
@@ -135,12 +135,12 @@ int main(int argc, char** argv) {{
         {out_type} got  = ({out_type})(top.data_out) & ({out_type})0x{out_mask:x}ULL;
         {out_type} want = ({out_type})(cases[c].expected & 0x{out_mask:x}ULL);
 
-        printf("CASE %zu %u 0x%llx\\n", c, cycles, (unsigned long long)got);
+        printf("@@H@@CASE %zu %u 0x%llx\\n", c, cycles, (unsigned long long)got);
 
         if (got != want) {{
-            printf("INCORRECT %zu want=0x%llx got=0x%llx\\n",
+            printf("@@H@@INCORRECT %zu want=0x%llx got=0x%llx\\n",
                    c, (unsigned long long)want, (unsigned long long)got);
-            printf("TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
+            printf("@@H@@TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
             free(cases);
             return 2;
         }}
@@ -149,8 +149,8 @@ int main(int argc, char** argv) {{
         tick(&top);  // drain: let done drop before next start
     }}
 
-    printf("TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
-    printf("OK\\n");
+    printf("@@H@@TOTAL_CYCLES %llu\\n", (unsigned long long)total_cycles);
+    printf("@@H@@OK\\n");
     free(cases);
     return 0;
 }}

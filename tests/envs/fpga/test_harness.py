@@ -38,17 +38,17 @@ class TestRenderHarness:
     def test_sim_main_prints_ok_on_success(self):
         task = _make_task()
         h = render_harness(task)
-        assert 'printf("OK\\n")' in h.tb_cpp
+        assert 'printf("@@H@@OK\\n")' in h.tb_cpp
 
     def test_sim_main_prints_incorrect_on_mismatch(self):
         task = _make_task()
         h = render_harness(task)
-        assert "INCORRECT" in h.tb_cpp
+        assert "@@H@@INCORRECT" in h.tb_cpp
 
     def test_sim_main_prints_timeout(self):
         task = _make_task()
         h = render_harness(task)
-        assert "TIMEOUT" in h.tb_cpp
+        assert "@@H@@TIMEOUT" in h.tb_cpp
 
     def test_sim_main_reads_vectors_at_runtime(self):
         task = _make_task()
