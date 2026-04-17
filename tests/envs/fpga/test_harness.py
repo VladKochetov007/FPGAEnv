@@ -67,6 +67,16 @@ class TestRenderHarness:
         h = render_harness(task)
         assert "my_task" in h.tb_cpp
 
+    def test_resets_between_cases(self):
+        """Anti-reward-hack: each case must start from rst, breaking any
+        hidden FSM state a submission might carry across cases."""
+        task = _make_task()
+        h = render_harness(task)
+        loop_idx = h.tb_cpp.find("for (size_t c = 0; c < n_cases;")
+        assert loop_idx != -1, "per-case loop missing"
+        assert "top.rst = 1;" in h.tb_cpp[loop_idx:], \
+            "rst not asserted inside per-case loop"
+
 
 class TestWriteVectorsBin:
     def test_roundtrip_header(self):

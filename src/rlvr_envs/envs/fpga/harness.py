@@ -97,16 +97,21 @@ int main(int argc, char** argv) {{
     ctx.commandArgs(argc, argv);
     Vdut top(&ctx);
 
-    // Synchronous reset for 3 cycles.
+    // Initial bring-up.
     top.clk = 0; top.rst = 1; top.start = 0; top.data_in = 0;
     top.eval();
-    for (int i = 0; i < 3; ++i) tick(&top);
-    top.rst = 0;
-    tick(&top);
 
     uint64_t total_cycles = 0;
 
     for (size_t c = 0; c < n_cases; ++c) {{
+        // Reset between cases: a submission that accumulates hidden FSM state
+        // across cases (online memorisation / sequence-prediction attack) loses
+        // that state every case. Synchronous, active-high rst for 3 ticks.
+        top.rst = 1; top.start = 0; top.data_in = 0;
+        for (int i = 0; i < 3; ++i) tick(&top);
+        top.rst = 0;
+        tick(&top);
+
         top.data_in = ({in_type})(cases[c].input_word & 0x{in_mask:x}ULL);
         top.start   = 1;
         tick(&top);

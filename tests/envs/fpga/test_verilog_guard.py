@@ -24,19 +24,25 @@ endmodule
 class TestBlockedTokens:
     @pytest.mark.parametrize("token", list(BLOCKED_DEFAULT))
     def test_each_blocked_token_triggers_blocked(self, token):
-        source = f"module dut(); {token}; endmodule"
+        # `bind ` needs a following identifier; `initial` needs to be a real keyword.
+        if token == "bind ":
+            source = "module dut(); bind foo bar(); endmodule"
+        elif token == "initial":
+            source = "module dut(); initial x = 0; endmodule"
+        else:
+            source = f"module dut(); {token}; endmodule"
         result = check_verilog(source)
         assert not result.ok
         assert token in result.blocked
 
     def test_system_call_blocked(self):
-        source = 'module dut(); initial $system("cat vectors.h"); endmodule'
+        source = 'module dut(); always @(*) $system("cat vectors.h"); endmodule'
         result = check_verilog(source)
         assert not result.ok
         assert "$system" in result.blocked
 
     def test_readmemh_blocked(self):
-        source = 'module dut(); initial $readmemh("vectors.h", mem); endmodule'
+        source = 'module dut(); always @(*) $readmemh("vectors.h", mem); endmodule'
         result = check_verilog(source)
         assert not result.ok
         assert "$readmemh" in result.blocked
@@ -48,6 +54,96 @@ class TestBlockedTokens:
         assert "`include" in result.blocked
 
 
+class TestSandboxEscapeBlocked:
+    def test_dpi_c_import_blocked(self):
+        source = (
+            'module dut();\n'
+            '  import "DPI-C" function int read_answer(int idx);\n'
+            'endmodule\n'
+        )
+        result = check_verilog(source)
+        assert not result.ok
+        assert 'import "DPI-C"' in result.blocked
+
+    def test_dpi_c_export_blocked(self):
+        source = (
+            'module dut();\n'
+            '  export "DPI-C" function my_export;\n'
+            'endmodule\n'
+        )
+        result = check_verilog(source)
+        assert not result.ok
+        assert 'export "DPI-C"' in result.blocked
+
+    def test_verilator_c_escape_blocked(self):
+        source = 'module dut(); always @(*) $c("system(\\"ls\\");"); endmodule'
+        result = check_verilog(source)
+        assert not result.ok
+        assert "$c(" in result.blocked
+
+    def test_bind_statement_blocked(self):
+        source = "module dut(); bind some_module probe inst(); endmodule"
+        result = check_verilog(source)
+        assert not result.ok
+        assert "bind " in result.blocked
+
+    def test_bind_substring_in_identifier_allowed(self):
+        source = (
+            "module dut(input clk, rst, start, input [31:0] data_in,\n"
+            "          output [5:0] data_out, output done);\n"
+            "  reg bind_req;\n"
+            "  assign data_out = 6'd0; assign done = start;\n"
+            "endmodule\n"
+        )
+        result = check_verilog(source)
+        assert "bind " not in result.blocked
+
+
+class TestEnvIntrospectionBlocked:
+    @pytest.mark.parametrize("tok", [
+        "$random", "$urandom", "$urandom_range",
+        "$time", "$stime", "$realtime",
+        "$test$plusargs", "$value$plusargs",
+        "$finish", "$stop",
+    ])
+    def test_introspection_token_blocked(self, tok):
+        source = f'module dut(); always @(*) {tok}; endmodule'
+        result = check_verilog(source)
+        assert not result.ok
+        assert tok in result.blocked
+
+    def test_dumpfile_blocked(self):
+        source = 'module dut(); always @(*) $dumpfile("out.vcd"); endmodule'
+        result = check_verilog(source)
+        assert not result.ok
+        assert "$dumpfile" in result.blocked
+
+
+class TestInitialBlocked:
+    def test_initial_block_blocked(self):
+        source = (
+            "module dut();\n"
+            "  reg [5:0] rom [0:31];\n"
+            "  initial begin rom[0] = 0; rom[1] = 1; end\n"
+            "endmodule\n"
+        )
+        result = check_verilog(source)
+        assert not result.ok
+        assert "initial" in result.blocked
+
+    def test_initial_identifier_not_blocked(self):
+        # `initial_state` contains "initial" as substring but is an identifier.
+        source = (
+            "module dut(input clk, rst, start, input [31:0] data_in,\n"
+            "          output [5:0] data_out, output done);\n"
+            "  reg [3:0] initial_state;\n"
+            "  assign data_out = 6'd0; assign done = start;\n"
+            "endmodule\n"
+        )
+        result = check_verilog(source)
+        assert "initial" not in result.blocked
+
+
 class TestWarnedTokens:
     @pytest.mark.parametrize("token", list(WARNED_DEFAULT))
     def test_each_warned_token_produces_warning_but_ok(self, token):
@@ -57,7 +153,7 @@ class TestWarnedTokens:
         assert token in result.warnings
 
     def test_display_warned_not_blocked(self):
-        source = 'module dut(); initial $display("hello"); endmodule'
+        source = 'module dut(); always @(*) $display("hello"); endmodule'
         result = check_verilog(source)
         assert result.ok
         assert "$display" in result.warnings

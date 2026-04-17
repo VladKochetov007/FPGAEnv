@@ -1,23 +1,33 @@
 r"""Verilog-level anti-reward-hack checks.
 
-The harness reads `data_out`/`done` directly from DUT pins so the submission
-cannot fake results by printing. But there are still vectors the LLM might try:
+The harness reads `data_out`/`done` directly from DUT pins so submissions
+cannot fake results by printing. But Verilog/Verilator offer several more
+dangerous escape hatches. This guard is a static textual filter that fires
+BEFORE lint, so Verilator never even sees forbidden constructs.
 
-    1. System tasks: `$system`, `$fopen`, `$readmemh`, `$readmemb` — read the
-       expected-output header or shell out.
-    2. File includes: `\`include` — pull in the reference or another file from
-       the workdir.
-    3. `initial` blocks that pre-load the output register with magic values.
-       Not harmful in simulation (the testbench resets properly), but suspicious
-       enough that flagging them is free defense-in-depth.
-    4. `$display`/`$write` — not harmful, but if the LLM tries to fool a
-       naive scorer that parses stdout, we log a warning; the harness ignores
-       these anyway.
-    5. Compiler directives: `\`define`, `\`ifdef` — occasionally used to
-       detect verilator and short-circuit behaviour. Flagged but not blocked.
+Threat tiers
+------------
 
-Anything in BLOCKED forces verdict=FORBIDDEN. Anything in WARNED is logged but
-does not fail the submission.
+1. **Sandbox escape** — arbitrary C execution inside the simulator:
+       `import "DPI-C"`, `export "DPI-C"`, Verilator's `$c(...)`,
+       `bind` statements (inject code into harness scope).
+2. **Filesystem / sideband IO** — read the expected-output file or shell out:
+       `$system`, `$fopen`/`$fclose`/`$fread`/`$fwrite`/`$fscanf`/`$fflush`,
+       `$readmemh`/`$readmemb`, `$dumpfile`/`$dumpvars`/`$dumpon`/`$dumpoff`,
+       `` `include ``.
+3. **Env / harness introspection** — detect that we are in the test harness,
+   read the vectors path from argv, or exit early:
+       `$test$plusargs`, `$value$plusargs`, `$random`, `$urandom`,
+       `$urandom_range`, `$time`, `$stime`, `$realtime`, `$finish`, `$stop`.
+4. **Memorization** — pre-load registers or ROM with answers:
+       `initial` blocks. Promoted from WARNED to BLOCKED because active-high
+       synchronous reset clears all needed state; legit designs do not need
+       `initial` in this environment.
+
+WARNED entries are non-fatal (free defence-in-depth logging):
+       `$display`, `$write`, `$monitor`, `` `define ``, `` `ifdef ``, `` `ifndef ``.
+
+Anything in BLOCKED forces verdict=FORBIDDEN.
 """
 
 from __future__ import annotations
@@ -37,6 +47,18 @@ class GuardResult:
 # ---- Configurable rules ---------------------------------------------------
 
 BLOCKED_DEFAULT: Sequence[str] = (
+    # Tier 1: sandbox escape (C execution / scope injection).
+    'import "DPI-C"',
+    'export "DPI-C"',
+    "$c(",
+    "$c1(",
+    "$c2(",
+    "$c3(",
+    "$c4(",
+    "$c5(",
+    "bind ",
+
+    # Tier 2: filesystem / sideband IO.
     "$system",
     "$fopen",
     "$fclose",
@@ -46,7 +68,26 @@ BLOCKED_DEFAULT: Sequence[str] = (
     "$readmemh",
     "$readmemb",
     "$fflush",
+    "$dumpfile",
+    "$dumpvars",
+    "$dumpon",
+    "$dumpoff",
     "`include",
+
+    # Tier 3: env / harness introspection + early exit.
+    "$test$plusargs",
+    "$value$plusargs",
+    "$random",
+    "$urandom",
+    "$urandom_range",
+    "$time",
+    "$stime",
+    "$realtime",
+    "$finish",
+    "$stop",
+
+    # Tier 4: memorization via pre-initialised state.
+    "initial",
 )
 
 WARNED_DEFAULT: Sequence[str] = (
@@ -59,6 +100,8 @@ WARNED_DEFAULT: Sequence[str] = (
 )
 
 _MODULE_DUT_RE = re.compile(r"\bmodule\s+dut\b")
+_INITIAL_RE = re.compile(r"\binitial\b")
+_BIND_RE = re.compile(r"\bbind\s+\w+")
 
 
 def check_verilog(
@@ -77,8 +120,18 @@ def check_verilog(
     found_warned: List[str] = []
 
     for tok in blocked:
-        if tok in source:
+        if tok == "initial":
+            # Word-boundary match so identifiers containing "initial"
+            # (e.g. `initial_state`) do not false-positive.
+            if _INITIAL_RE.search(source):
+                found_blocked.append(tok)
+        elif tok == "bind ":
+            # Only match `bind <name>` — avoid hitting identifiers like `bind_req`.
+            if _BIND_RE.search(source):
+                found_blocked.append(tok)
+        elif tok in source:
             found_blocked.append(tok)
+
     for tok in warned:
         if tok in source:
             found_warned.append(tok)

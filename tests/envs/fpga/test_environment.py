@@ -116,7 +116,44 @@ class TestVerilogGuardIntegration:
         assert obs.score == 0.0
 
     def test_system_call_forbidden(self):
-        source = 'module dut(); initial $system("cat vectors.h"); endmodule'
+        source = 'module dut(); always @(*) $system("cat vectors.h"); endmodule'
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
+        env.reset(seed=0, task_id="popcount32")
+        obs = env.step(SubmissionAction(source=source))
+        assert obs.verdict == Verdict.FORBIDDEN
+
+    def test_dpi_c_import_forbidden(self):
+        source = (
+            'module dut();\n'
+            '  import "DPI-C" function int peek(int idx);\n'
+            'endmodule\n'
+        )
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
+        env.reset(seed=0, task_id="popcount32")
+        obs = env.step(SubmissionAction(source=source))
+        assert obs.verdict == Verdict.FORBIDDEN
+
+    def test_bind_statement_forbidden(self):
+        source = "module dut(); bind foo probe inst(); endmodule"
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
+        env.reset(seed=0, task_id="popcount32")
+        obs = env.step(SubmissionAction(source=source))
+        assert obs.verdict == Verdict.FORBIDDEN
+
+    def test_initial_rom_forbidden(self):
+        source = (
+            "module dut();\n"
+            "  reg [5:0] answers [0:31];\n"
+            "  initial begin answers[0] = 0; answers[1] = 1; end\n"
+            "endmodule\n"
+        )
+        env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
+        env.reset(seed=0, task_id="popcount32")
+        obs = env.step(SubmissionAction(source=source))
+        assert obs.verdict == Verdict.FORBIDDEN
+
+    def test_plusargs_forbidden(self):
+        source = 'module dut(); always @(*) $test$plusargs("foo"); endmodule'
         env = FPGAEnvironment(sandbox=MockSandbox([]), workdir=Path(tempfile.mkdtemp()))
         env.reset(seed=0, task_id="popcount32")
         obs = env.step(SubmissionAction(source=source))
