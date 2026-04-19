@@ -8,12 +8,26 @@ EXPECTED_TASKS = [
     "popcount32", "bitrev16", "gcd16", "mul8", "div16", "isqrt32",
     "crc8", "xor_cipher16", "adler32", "matvec_2x2_int4", "ray_hit_2d",
     "arbiter_rr",
+    # Graph algorithms
+    "graph_reach_4", "graph_triangle_5", "graph_bipartite_6",
+    # Search & selection
+    "binsearch_8x4", "kth_smallest_4x8", "argmax_8x8",
+    # Data structures
+    "heap_check_7", "ll_traverse_4", "merge_2x4",
+    # Number theory
+    "prime_check_u8", "modexp_small",
+    # Sequence / string
+    "seq_detect_1011", "palindrome_8n",
+    # Combinatorial
+    "subset_sum_4x6", "inversion_4x4",
+    # Aggregate / reduction
+    "histogram_4bin", "argmax_argmin_4x8",
 ]
 
 
 class TestTaskRegistryCoverage:
-    def test_all_12_tasks_present(self):
-        assert len(TASK_REGISTRY) == 12
+    def test_registry_size_matches_expected(self):
+        assert len(TASK_REGISTRY) == len(EXPECTED_TASKS)
 
     @pytest.mark.parametrize("name", EXPECTED_TASKS)
     def test_task_in_registry(self, name):

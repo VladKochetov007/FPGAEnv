@@ -36,6 +36,18 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+# Matches // line comments and /* block */ comments.
+_COMMENT_RE = re.compile(
+    r'//[^\n]*'           # // ... to end of line
+    r'|/\*.*?\*/',        # /* ... */
+    re.DOTALL,
+)
+
+
+def _strip_comments(source: str) -> str:
+    """Remove Verilog // and /* */ comments, preserving line structure."""
+    return _COMMENT_RE.sub(lambda m: '\n' * m.group().count('\n'), source)
+
 
 @dataclass(frozen=True)
 class GuardResult:
@@ -141,16 +153,22 @@ def check_verilog(
     if warned is None:
         warned = WARNED_DEFAULT
 
+    # Word-boundary checks (initial/fork/wait/…) must not fire on comment text.
+    # Strip comments once for that path; string-literal tokens ($system, DPI, …)
+    # are scanned against the original source because they are unambiguous.
+    source_no_comments = _strip_comments(source)
+
     found_blocked: List[str] = []
     found_warned: List[str] = []
 
     for tok in blocked:
         if tok in _WORD_KEYWORDS:
-            if re.search(rf"\b{re.escape(tok)}\b", source):
+            # Search comment-stripped source so "// initial value" is not flagged.
+            if re.search(rf"\b{re.escape(tok)}\b", source_no_comments):
                 found_blocked.append(tok)
         elif tok == "bind ":
             # Only match `bind <name>` — avoid hitting identifiers like `bind_req`.
-            if _BIND_RE.search(source):
+            if _BIND_RE.search(source_no_comments):
                 found_blocked.append(tok)
         elif tok in source:
             found_blocked.append(tok)
