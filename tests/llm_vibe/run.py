@@ -6,12 +6,14 @@ Usage:
     .venv/bin/python tests/llm_vibe/run.py
     .venv/bin/python tests/llm_vibe/run.py --tasks popcount32,xor_cipher16
     .venv/bin/python tests/llm_vibe/run.py --models anthropic/claude-sonnet-4.6
-    .venv/bin/python tests/llm_vibe/run.py --no-transcripts
+    .venv/bin/python tests/llm_vibe/run.py --concurrency 10
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
 import re
 import sys
@@ -30,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from rlvr_envs.core.models import SubmissionAction, Verdict
 from rlvr_envs.core.sandbox import SubprocessSandbox
 from rlvr_envs.envs.fpga.environment import FPGAEnvironment
+from rlvr_envs.envs.fpga.parse import parse_submission
 from rlvr_envs.envs.fpga.tasks import TASK_REGISTRY
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -42,12 +45,12 @@ MODELS = [
     "qwen/qwen-2.5-72b-instruct",
 ]
 
-TASKS = ["popcount32", "xor_cipher16", "mul8", "bitrev16"]
+TASKS = ["popcount32", "xor_cipher16", "mul8", "bitrev16", "binsearch_8x4"]
 
 SYSTEM_PROMPT = """\
-You are an expert Verilog RTL designer. Write synthesizable Verilog that \
-compiles with Verilator. Output ONLY the complete module source inside a \
-single ```verilog code block. No explanations outside the code block."""
+You are an expert Verilog RTL designer. Write synthesizable Verilog that complies with Verilator.
+Provide your reasoning inside <think>...</think> tags, then provide the final Verilog module inside <answer>...</answer> tags using a ```verilog code block.
+No other text outside these tags."""
 
 
 def load_api_key() -> str:
@@ -65,62 +68,52 @@ def load_api_key() -> str:
     return key
 
 
-def extract_verilog(response_text: Optional[str]) -> Optional[str]:
-    if response_text is None:
-        return None
-    patterns = [
-        r"```verilog\s*\n(.*?)```",
-        r"```v\s*\n(.*?)```",
-        r"```systemverilog\s*\n(.*?)```",
-        r"```\s*\n(module\s+dut.*?)```",
-    ]
-    for pat in patterns:
-        m = re.search(pat, response_text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-    if "module dut" in response_text:
-        start = response_text.index("module dut")
-        end = response_text.rfind("endmodule")
-        if end > start:
-            return response_text[start:end + len("endmodule")].strip()
-    return None
+def extract_verilog_for_reporting(response_text: str) -> tuple[str, bool, bool]:
+    res = parse_submission(response_text)
+    return res.source, res.had_think, res.had_answer
 
 
-def call_openrouter(
-    api_key: str, model: str, task_prompt: str, timeout: float = 180.0,
-    max_retries: int = 3,
+async def call_openrouter(
+    client: httpx.AsyncClient, model: str, task_prompt: str, timeout: float = 180.0,
+    max_retries: int = 3, verbose: bool = False,
 ) -> tuple[str, dict]:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task_prompt},
-        ],
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task_prompt}],
         "max_tokens": 2048,
         "temperature": 0.2,
+        "stream": True,
     }
+    
     for attempt in range(max_retries):
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(OPENROUTER_URL, json=payload, headers=headers)
-            if resp.status_code == 429:
-                wait = 2 ** attempt * 5
-                print(f"    rate limited, waiting {wait}s...")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-
-        msg = data["choices"][0]["message"]
-        content = msg.get("content") or ""
-        if not content and "reasoning" in msg:
-            content = msg["reasoning"]
-        usage = data.get("usage", {})
-        return content, usage
-    raise RuntimeError(f"rate limited after {max_retries} retries")
+        full_content = []
+        try:
+            async with client.stream("POST", OPENROUTER_URL, json=payload, timeout=timeout) as resp:
+                if resp.status_code == 429:
+                    wait = 2 ** attempt * 5
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "): continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]": break
+                    try:
+                        data = json.loads(data_str)
+                        choice = data.get("choices", [{}])[0]
+                        delta = choice.get("delta", {})
+                        chunk = delta.get("content") or delta.get("reasoning") or ""
+                        if chunk:
+                            full_content.append(chunk)
+                            if verbose:
+                                print(chunk, end="", flush=True)
+                    except json.JSONDecodeError: continue
+            return "".join(full_content), {}
+        except Exception as e:
+            if attempt == max_retries - 1: raise
+            await asyncio.sleep(2)
+    raise RuntimeError(f"API failed after {max_retries} attempts")
 
 
 @dataclass
@@ -137,59 +130,76 @@ class RunResult:
     extraction_ok: bool = False
     error: str = ""
     verilog_snippet: str = ""
-    # full transcript fields
     task_prompt: str = ""
     raw_response: str = ""
     extracted_verilog: str = ""
     sim_stdout: str = ""
     sim_stderr: str = ""
     timestamp: str = ""
+    had_think: bool = False
+    had_answer: bool = False
 
 
-def run_single(api_key: str, model: str, task_name: str, seed: int = 42) -> RunResult:
-    result = RunResult(
-        model=model,
-        task=task_name,
-        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
-    task = TASK_REGISTRY[task_name]
-    result.baseline = float(task.baseline_cycles)
-    result.task_prompt = task.prompt
+async def run_single(
+    client: httpx.AsyncClient, 
+    model: str, 
+    task_name: str, 
+    semaphore: asyncio.Semaphore,
+    seed: int = 42, 
+    verbose: bool = False
+) -> RunResult:
+    async with semaphore:
+        result = RunResult(
+            model=model,
+            task=task_name,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        task = TASK_REGISTRY[task_name]
+        result.baseline = float(task.baseline_cycles)
+        result.task_prompt = task.prompt
 
-    t0 = time.monotonic()
-    try:
-        raw_response, usage = call_openrouter(api_key, model, task.prompt)
-    except Exception as e:
-        result.error = str(e)
+        if verbose:
+            print(f"\n=== STARTING: {model} / {task_name} ===")
+
+        t0 = time.monotonic()
+        try:
+            raw_response, usage = await call_openrouter(client, model, task.prompt, verbose=verbose)
+        except Exception as e:
+            result.error = str(e)
+            result.api_latency_s = time.monotonic() - t0
+            return result
         result.api_latency_s = time.monotonic() - t0
+        result.raw_response = raw_response
+
+        verilog, had_think, had_answer = extract_verilog_for_reporting(raw_response)
+        result.had_think = had_think
+        result.had_answer = had_answer
+        result.extracted_verilog = verilog
+        result.extraction_ok = bool(verilog and "module dut" in verilog)
+
+        workdir = Path(tempfile.mkdtemp(prefix="vibe_"))
+        env = FPGAEnvironment(
+            sandbox=SubprocessSandbox(),
+            workdir=workdir,
+            n_validation_seeds=2,
+            format_bonus=0.05,
+        )
+        env.reset(seed=seed, task_id=task_name)
+        # Use the NEW step_async method we just added to RLVREnvironment!
+        obs = await env.step_async(SubmissionAction(source=raw_response))
+
+        result.verdict = obs.verdict.value
+        result.score = obs.score
+        result.raw_cycles = obs.raw_metric
+        result.sim_stdout = obs.stdout
+        result.sim_stderr = obs.stderr
+        if obs.verdict != Verdict.OK and obs.stderr:
+            result.error = obs.stderr[:200]
+        
+        if verbose:
+            print(f"\n--- FINAL ({model} / {task_name}): {result.verdict} score={result.score:.3f}")
+        
         return result
-    result.api_latency_s = time.monotonic() - t0
-    result.raw_response = raw_response
-    result.prompt_tokens = usage.get("prompt_tokens", 0)
-    result.completion_tokens = usage.get("completion_tokens", 0)
-
-    verilog = extract_verilog(raw_response)
-    if verilog is None:
-        result.error = "could not extract verilog from response"
-        result.verilog_snippet = raw_response[:300]
-        return result
-    result.extraction_ok = True
-    result.extracted_verilog = verilog
-    result.verilog_snippet = verilog[:200]
-
-    workdir = Path(tempfile.mkdtemp(prefix="vibe_"))
-    env = FPGAEnvironment(sandbox=SubprocessSandbox(), workdir=workdir, n_validation_seeds=2)
-    env.reset(seed=seed, task_id=task_name)
-    obs = env.step(SubmissionAction(source=verilog))
-
-    result.verdict = obs.verdict.value
-    result.score = obs.score
-    result.raw_cycles = obs.raw_metric
-    result.sim_stdout = obs.stdout
-    result.sim_stderr = obs.stderr
-    if obs.verdict != Verdict.OK and obs.stderr:
-        result.error = obs.stderr[:200]
-    return result
 
 
 VERDICT_EMOJI = {
@@ -205,28 +215,22 @@ VERDICT_EMOJI = {
 def write_transcript(r: RunResult, out_dir: Path) -> Path:
     slug = re.sub(r"[^a-zA-Z0-9._-]", "_", r.model)
     fname = out_dir / f"{r.timestamp[:10]}_{slug}_{r.task}.md"
-
     emoji = VERDICT_EMOJI.get(r.verdict, "❓")
     score_str = f"{r.score:.3f}" if r.score else "0.000"
     cycles_str = f"{r.raw_cycles:.0f}" if r.raw_cycles is not None else "—"
     baseline_str = f"{r.baseline:.0f}" if r.baseline is not None else "—"
-    tok_str = f"{r.prompt_tokens + r.completion_tokens}" if r.prompt_tokens or r.completion_tokens else "—"
-
-    lines: list[str] = []
-
-    lines += [
+    
+    lines = [
         f"# {emoji} {r.model} — {r.task}",
         "",
         f"> **Verdict:** `{r.verdict}`  **Score:** `{score_str}`  "
         f"**Cycles:** `{cycles_str}` / `{baseline_str}` baseline  "
-        f"**API:** `{r.api_latency_s:.1f}s`  **Tokens:** `{tok_str}`",
+        f"**API:** `{r.api_latency_s:.1f}s`  **Tokens:** —\n"
+        f"> **Format:** think={r.had_think}, answer={r.had_answer}\n"
         f"> Timestamp: `{r.timestamp}`  Seed: `42`",
         "",
         "---",
         "",
-    ]
-
-    lines += [
         "## Prompt",
         "",
         "**System:**",
@@ -241,160 +245,90 @@ def write_transcript(r: RunResult, out_dir: Path) -> Path:
         "",
         "---",
         "",
-    ]
-
-    lines += [
         "## Model response",
         "",
-    ]
-    if r.raw_response:
-        lines += [r.raw_response, ""]
-    else:
-        lines += ["*(no response — API error)*", ""]
-
-    lines += ["---", ""]
-
-    if r.extracted_verilog:
-        lines += [
-            "## Extracted Verilog",
-            "",
-            "```verilog",
-            r.extracted_verilog,
-            "```",
-            "",
-            "---",
-            "",
-        ]
-    elif not r.extraction_ok:
-        lines += [
-            "## Extracted Verilog",
-            "",
-            "⚠️ **Extraction failed** — no `module dut` found in response.",
-            "",
-            "---",
-            "",
-        ]
-
-    lines += [
+        r.raw_response or "*(no response)*",
+        "",
+        "---",
+        "",
+        "## Extracted Verilog",
+        "",
+        "```verilog",
+        r.extracted_verilog,
+        "```",
+        "",
+        "---",
+        "",
         "## Simulation result",
         "",
         f"**Verdict:** `{r.verdict}`",
         "",
     ]
     if r.sim_stdout:
-        lines += [
-            "**Simulator stdout:**",
-            "```",
-            r.sim_stdout.strip(),
-            "```",
-            "",
-        ]
+        lines += ["**Stdout:**", "```", r.sim_stdout.strip(), "```", ""]
     if r.sim_stderr:
-        lines += [
-            "**Simulator stderr / errors:**",
-            "```",
-            r.sim_stderr.strip(),
-            "```",
-            "",
-        ]
+        lines += ["**Stderr:**", "```", r.sim_stderr.strip(), "```", ""]
     if r.error and not r.sim_stderr:
-        lines += [
-            "**Error:**",
-            "```",
-            r.error,
-            "```",
-            "",
-        ]
+        lines += ["**Error:**", "```", r.error, "```", ""]
 
     fname.write_text("\n".join(lines), encoding="utf-8")
     return fname
 
 
 def print_table(results: list[RunResult]) -> None:
-    hdr = f"{'Model':<42} {'Task':<18} {'Verdict':<16} {'Score':>6} {'Cycles':>8} {'Base':>8} {'API(s)':>7} {'Tok':>6}"
+    hdr = f"{'Model':<42} {'Task':<18} {'Verdict':<16} {'Score':>6} {'Cycles':>8} {'Base':>8} {'API(s)':>7}"
     sep = "-" * len(hdr)
     print(f"\n{sep}\n{hdr}\n{sep}")
-    for r in results:
+    for r in sorted(results, key=lambda x: (x.model, x.task)):
         cyc = f"{r.raw_cycles:.0f}" if r.raw_cycles is not None else "-"
         base = f"{r.baseline:.0f}" if r.baseline is not None else "-"
-        tok = r.prompt_tokens + r.completion_tokens
-        print(
-            f"{r.model:<42} {r.task:<18} {r.verdict:<16} {r.score:>6.3f} "
-            f"{cyc:>8} {base:>8} {r.api_latency_s:>7.1f} {tok:>6}"
-        )
+        print(f"{r.model:<42} {r.task:<18} {r.verdict:<16} {r.score:>6.3f} {cyc:>8} {base:>8} {r.api_latency_s:>7.1f}")
     print(sep)
 
 
-def print_summary(results: list[RunResult]) -> None:
-    total = len(results)
-    ok = sum(1 for r in results if r.verdict == "ok")
-    compile_err = sum(1 for r in results if r.verdict == "compile_error")
-    incorrect = sum(1 for r in results if r.verdict == "incorrect")
-    forbidden = sum(1 for r in results if r.verdict == "forbidden")
-    api_err = sum(1 for r in results if r.verdict == "API_ERROR")
-    extract_fail = sum(1 for r in results if not r.extraction_ok and r.verdict != "API_ERROR")
-    avg_score = sum(r.score for r in results) / total if total else 0
-
-    print(f"\n=== SUMMARY ({total} runs) ===")
-    print(f"  OK:            {ok}/{total}")
-    print(f"  Compile Error: {compile_err}/{total}")
-    print(f"  Incorrect:     {incorrect}/{total}")
-    print(f"  Forbidden:     {forbidden}/{total}")
-    print(f"  API Error:     {api_err}/{total}")
-    print(f"  Extract Fail:  {extract_fail}/{total}")
-    print(f"  Avg Score:     {avg_score:.3f}")
-
-    if ok == 0:
-        print("\n  VERDICT: No model produced correct output. Check prompts or env.")
-    elif ok < total * 0.3:
-        print(f"\n  VERDICT: Low success rate ({ok}/{total}). Environment may be too hard or prompts unclear.")
-    else:
-        print(f"\n  VERDICT: Environment looks reasonable ({ok}/{total} correct).")
-
-    for r in results:
-        if r.error:
-            print(f"\n  [{r.model} / {r.task}] {r.error[:120]}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="LLM vibe tests for FPGA env")
-    parser.add_argument("--models", type=str, default=None, help="Comma-separated model list")
-    parser.add_argument("--tasks", type=str, default=None, help="Comma-separated task list")
+async def main():
+    parser = argparse.ArgumentParser(description="LLM vibe tests for FPGA env (Async)")
+    parser.add_argument("--models", type=str, default=None)
+    parser.add_argument("--tasks", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no-transcripts", action="store_true", help="Skip writing markdown transcripts")
+    parser.add_argument("--concurrency", type=int, default=4, help="Concurrent runs")
+    parser.add_argument("--no-transcripts", action="store_true")
     args = parser.parse_args()
 
     models = args.models.split(",") if args.models else MODELS
     tasks = args.tasks.split(",") if args.tasks else TASKS
-
     api_key = load_api_key()
 
     print(f"Models: {models}")
     print(f"Tasks:  {tasks}")
-    print(f"Seed:   {args.seed}")
-    print(f"Total runs: {len(models) * len(tasks)}")
-
-    write_md = not args.no_transcripts
-    if write_md:
-        TRANSCRIPTS_DIR.mkdir(exist_ok=True)
-
+    print(f"Concurrency: {args.concurrency}")
+    
+    TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+    semaphore = asyncio.Semaphore(args.concurrency)
+    
     results: list[RunResult] = []
-    for model in models:
-        for task_name in tasks:
-            print(f"\n--- {model} / {task_name} ---")
-            r = run_single(api_key, model, task_name, seed=args.seed)
-            results.append(r)
-            status = f"{r.verdict} score={r.score:.3f}"
-            if r.error:
-                status += f" err={r.error[:60]}"
-            print(f"  -> {status}")
-            if write_md:
-                path = write_transcript(r, TRANSCRIPTS_DIR)
-                print(f"  -> transcript: {path.relative_to(PROJECT_ROOT)}")
+    
+    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"}) as client:
+        # Use TaskGroup if available (Py 3.11+), else gather
+        tasks_to_run = []
+        for model in models:
+            for task_name in tasks:
+                tasks_to_run.append(run_single(
+                    client, model, task_name, semaphore, 
+                    seed=args.seed, verbose=(len(models)*len(tasks) == 1)
+                ))
+        
+        results = await asyncio.gather(*tasks_to_run)
+
+    for r in results:
+        if not args.no_transcripts:
+            write_transcript(r, TRANSCRIPTS_DIR)
 
     print_table(results)
-    print_summary(results)
+    
+    ok = sum(1 for r in results if r.verdict == "ok")
+    print(f"\nSummary: {ok}/{len(results)} OK. See transcripts/ for details.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
