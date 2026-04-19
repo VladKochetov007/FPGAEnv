@@ -1,16 +1,4 @@
-"""Thin wrapper around the Verilator CLI.
-
-Two phases per submission:
-    1. Lint the user's Verilog on its own (fails fast on syntax errors).
-    2. Build and run the simulation with the generated harness and vectors.
-
-We never invoke Verilator directly inside the env code — always through the
-`Sandbox` abstraction, so unit tests can feed scripted outputs and adversarial
-tests can simulate crashes/OOMs/timeouts.
-
-Verdict parsing lives here too because the harness defines the on-the-wire
-format and we want a single place that understands it.
-"""
+"""Thin wrapper around the Verilator CLI."""
 
 from __future__ import annotations
 
@@ -37,19 +25,17 @@ class SimReport:
     per_case_cycles: List[int]
 
 
-def lint(
+async def lint_async(
     sandbox: Sandbox,
     source_path: Path,
     *,
     cwd: Path,
     wall_seconds: float = 15.0,
 ) -> SandboxResult:
-    """Run `verilator --lint-only -Wall --top-module dut source.v`."""
-    return sandbox.run(
+    """Run `verilator --lint-only` asynchronously."""
+    return await sandbox.run_async(
         [
             VERILATOR, "--lint-only",
-            # Downgrade stylistic width/unused/fallthrough warnings so the
-            # correctness gate only fires on genuine syntax/elaboration errors.
             "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-UNUSED",
             "-Wno-DECLFILENAME", "-Wno-CASEINCOMPLETE", "-Wno-CASEX",
             "--top-module", "dut", str(source_path),
@@ -59,7 +45,7 @@ def lint(
     )
 
 
-def build(
+async def build_async(
     sandbox: Sandbox,
     source_path: Path,
     tb_path: Path,
@@ -67,14 +53,10 @@ def build(
     cwd: Path,
     wall_seconds: float = 60.0,
 ) -> SandboxResult:
-    """Translate + compile in one step via `verilator --cc --exe --build`."""
-    return sandbox.run(
+    """Translate + compile asynchronously."""
+    return await sandbox.run_async(
         [
-            VERILATOR,
-            "--cc",
-            "--exe",
-            "--build",
-            "-j", "1",
+            VERILATOR, "--cc", "--exe", "--build", "-j", "1",
             "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-UNUSED",
             "-Wno-DECLFILENAME", "-Wno-CASEINCOMPLETE", "-Wno-CASEX",
             "--top-module", "dut",
@@ -84,33 +66,49 @@ def build(
             str(tb_path),
         ],
         cwd=cwd,
-        limits=SandboxLimits(
-            wall_seconds=wall_seconds,
-            cpu_seconds=wall_seconds,
-            memory_mb=1024,
-        ),
+        limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds, memory_mb=1024),
     )
 
 
-def run_sim(
+async def run_sim_async(
     sandbox: Sandbox,
     *,
     cwd: Path,
     vectors_path: Path,
     wall_seconds: float = 30.0,
 ) -> SandboxResult:
-    """Execute the compiled simulator with the given vectors binary."""
+    """Execute the simulation binary asynchronously."""
     binary = cwd / "obj_dir" / "Vdut"
-    return sandbox.run(
+    return await sandbox.run_async(
         [str(binary), str(vectors_path)],
         cwd=cwd,
         limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds),
     )
 
 
-# All harness lines are prefixed `@@H@@` so a submission that prints fake
-# CASE/OK/INCORRECT via `$display` cannot confuse the parser. Only lines
-# the harness itself emits are considered.
+def lint(sandbox: Sandbox, source_path: Path, *, cwd: Path, wall_seconds: float = 15.0) -> SandboxResult:
+    return sandbox.run([
+        VERILATOR, "--lint-only", "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-UNUSED",
+        "-Wno-DECLFILENAME", "-Wno-CASEINCOMPLETE", "-Wno-CASEX",
+        "--top-module", "dut", str(source_path),
+    ], cwd=cwd, limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds))
+
+
+def build(sandbox: Sandbox, source_path: Path, tb_path: Path, *, cwd: Path, wall_seconds: float = 60.0) -> SandboxResult:
+    return sandbox.run([
+        VERILATOR, "--cc", "--exe", "--build", "-j", "1",
+        "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-UNUSED",
+        "-Wno-DECLFILENAME", "-Wno-CASEINCOMPLETE", "-Wno-CASEX",
+        "--top-module", "dut", "-CFLAGS", "-O2 -std=c++17 -I..",
+        "-Mdir", "obj_dir", str(source_path), str(tb_path),
+    ], cwd=cwd, limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds, memory_mb=1024))
+
+
+def run_sim(sandbox: Sandbox, *, cwd: Path, vectors_path: Path, wall_seconds: float = 30.0) -> SandboxResult:
+    binary = cwd / "obj_dir" / "Vdut"
+    return sandbox.run([str(binary), str(vectors_path)], cwd=cwd, limits=SandboxLimits(wall_seconds=wall_seconds, cpu_seconds=wall_seconds))
+
+
 _CASE_RE = re.compile(r"^@@H@@CASE (\d+) (\d+) 0x[0-9a-fA-F]+$", re.MULTILINE)
 _TOTAL_RE = re.compile(r"^@@H@@TOTAL_CYCLES (\d+)$", re.MULTILINE)
 _INCORRECT_RE = re.compile(r"^@@H@@INCORRECT (\d+)", re.MULTILINE)
@@ -119,7 +117,6 @@ _OK_RE = re.compile(r"^@@H@@OK$", re.MULTILINE)
 
 
 def parse_sim_output(stdout: str) -> SimReport:
-    """Turn the harness's structured stdout into a SimReport."""
     incorrect = _INCORRECT_RE.search(stdout)
     timeout = _TIMEOUT_RE.search(stdout)
     total = _TOTAL_RE.search(stdout)

@@ -122,6 +122,38 @@ class RLVREnvironment(
             metadata={"episode_id": self._state.episode_id},
         )
 
+    async def step_async(
+        self,
+        action: SubmissionAction,
+        timeout_s: Optional[float] = None,
+        **kwargs: Any,
+    ) -> SubmissionObservation:
+        if self._current_task is None:
+            raise RuntimeError("step_async() called before reset(); no active task")
+
+        self._state.step_count += 1
+
+        graded = await self._grade_async(action, self._current_task, timeout_s=timeout_s)
+        score = graded.score if graded.verdict == Verdict.OK else 0.0
+        score = max(0.0, min(1.0, score))
+
+        self._state.last_verdict = graded.verdict
+        self._state.last_score = score
+
+        return SubmissionObservation(
+            verdict=graded.verdict,
+            score=score,
+            raw_metric=graded.raw_metric,
+            baseline_metric=graded.baseline_metric,
+            prompt=self._current_prompt,
+            stdout=graded.stdout,
+            stderr=graded.stderr,
+            details=graded.details or {},
+            done=True,
+            reward=score,
+            metadata={"episode_id": self._state.episode_id},
+        )
+
     @abstractmethod
     def _reset_task(
         self, *, seed: Optional[int], task_id: Optional[str], **kwargs: Any
@@ -137,3 +169,15 @@ class RLVREnvironment(
         timeout_s: Optional[float] = None,
     ) -> GradingResult:
         """Score the submission. Must uphold: verdict != OK ⇒ score == 0."""
+
+    async def _grade_async(
+        self,
+        action: SubmissionAction,
+        task: TaskT,
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> GradingResult:
+        """Async version of _grade. Default calls sync _grade in a thread pool."""
+        import asyncio
+        return await asyncio.to_thread(self._grade, action, task, timeout_s=timeout_s)
+

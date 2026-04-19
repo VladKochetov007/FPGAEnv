@@ -1,16 +1,8 @@
-"""Subprocess sandbox with wall-clock and memory limits.
-
-Not a security sandbox. Linux `resource.setrlimit` and `SIGKILL`-on-timeout are
-the right tool when the caller *also* trusts the harness (local RLVR training,
-CI). For untrusted third-party code you still want containers; those are the
-`ContainerProvider` layer in OpenEnv, not this module.
-
-The interface is abstract so tests can swap in a `MockSandbox` that replays
-deterministic results without actually forking a process — essential for CI
-where we cannot count on Verilator/GCC being present.
-"""
+"""Subprocess sandbox with wall-clock and memory limits."""
 
 from __future__ import annotations
+
+import asyncio
 
 import os
 import resource
@@ -61,6 +53,21 @@ class Sandbox(ABC):
         stdin_data: Optional[bytes] = None,
         limits: Optional[SandboxLimits] = None,
     ) -> SandboxResult: ...
+
+    async def run_async(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Optional[Dict[str, str]] = None,
+        stdin_data: Optional[bytes] = None,
+        limits: Optional[SandboxLimits] = None,
+    ) -> SandboxResult:
+        """Run asynchronously. Default implementation uses a thread pool."""
+        import asyncio
+        return await asyncio.to_thread(
+            self.run, argv, cwd=cwd, env=env, stdin_data=stdin_data, limits=limits
+        )
 
 
 class SubprocessSandbox(Sandbox):
@@ -130,6 +137,69 @@ class SubprocessSandbox(Sandbox):
 
         return SandboxResult(
             returncode=proc.returncode if proc.returncode is not None else -1,
+            stdout=stdout_b.decode("utf-8", errors="replace"),
+            stderr=stderr_b.decode("utf-8", errors="replace"),
+            wall_seconds=wall,
+            timed_out=timed_out,
+            oom=oom,
+            killed_signal=killed_signal,
+        )
+
+    async def run_async(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Optional[Dict[str, str]] = None,
+        stdin_data: Optional[bytes] = None,
+        limits: Optional[SandboxLimits] = None,
+    ) -> SandboxResult:
+        limits = limits or SandboxLimits()
+        cwd.mkdir(parents=True, exist_ok=True)
+        mem_bytes = limits.memory_mb * 1024 * 1024
+
+        def _preexec() -> None:
+            os.setsid()
+            # Hard limits enforced by the OS.
+            resource.setrlimit(resource.RLIMIT_CPU, (int(limits.cpu_seconds) + 1,) * 2)
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+        start = time.monotonic()
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            env=env,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=_preexec,
+        )
+
+        timed_out = False
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=stdin_data),
+                timeout=limits.wall_seconds,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = await proc.communicate()
+
+        wall = time.monotonic() - start
+        stdout_b = _truncate_bytes(stdout or b"", limits.max_output_bytes)
+        stderr_b = _truncate_bytes(stderr or b"", limits.max_output_bytes)
+
+        returncode = proc.returncode if proc.returncode is not None else -1
+        killed_signal = -returncode if returncode < 0 else None
+        oom = _looks_like_oom(stderr_b, returncode)
+
+        return SandboxResult(
+            returncode=returncode,
             stdout=stdout_b.decode("utf-8", errors="replace"),
             stderr=stderr_b.decode("utf-8", errors="replace"),
             wall_seconds=wall,
