@@ -22,8 +22,10 @@ EXPECTED_TASKS = [
     "subset_sum_4x6", "inversion_4x4",
     # Aggregate / reduction
     "histogram_4bin", "argmax_argmin_4x8",
+    # Complex State Machines & Microarchitecture
+    "stream_packet_fsm", "weighted_scheduler", "sliding_window_max_4",
+    "lru_cache_4", "pipeline_hazard_3",
 ]
-
 
 class TestTaskRegistryCoverage:
     def test_registry_size_matches_expected(self):

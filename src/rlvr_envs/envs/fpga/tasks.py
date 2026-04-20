@@ -1813,6 +1813,471 @@ ARGMAX_ARGMIN_4X8 = FPGATask(
 
 
 # ---------------------------------------------------------------------------
+# Complex State Machines & Microarchitecture
+# ---------------------------------------------------------------------------
+
+
+def _stream_packet_fsm(packed: int) -> int:
+    """Simulate a packet parser FSM.
+    Input: bounded stream of 8 bytes (64 bits).
+    data_in[63:56]=byte0, data_in[7:0]=byte7.
+    Protocol: Wait for START=0xAA. Next byte is LEN. Then LEN payload bytes.
+    Output:
+      For each of the 8 input bytes sequentially, we output a `valid` bit and `payload` byte.
+      Instead of truly streaming cycle-by-cycle (which requires a custom harness),
+      we output a 64-bit mask where each byte contains the payload IF it was valid,
+      and 0x00 otherwise. This proves the FSM successfully tracked indices and lengths.
+    """
+    stream = [(packed >> (8 * (7 - i))) & 0xFF for i in range(8)]
+    out_mask = 0
+    
+    state = 0 # 0=WAIT_START, 1=WAIT_LEN, 2=PAYLOAD
+    length = 0
+    
+    for i, b in enumerate(stream):
+        out_byte = 0
+        if state == 0:
+            if b == 0xAA:
+                state = 1
+        elif state == 1:
+            length = b
+            if length > 0:
+                state = 2
+            else:
+                state = 0
+        elif state == 2:
+            out_byte = b
+            length -= 1
+            if length == 0:
+                state = 0
+        
+        # Pack the output byte into its corresponding slot MSB-first to match input
+        out_mask |= (out_byte << (8 * (7 - i)))
+        
+    return out_mask
+
+
+def _stream_packet_vectors(seed: int) -> List[Tuple[int, int]]:
+    rng = random.Random(seed)
+    
+    def pack(stream: List[int]) -> int:
+        acc = 0
+        for i, b in enumerate(stream):
+            acc |= (b & 0xFF) << (8 * (7 - i))
+        return acc
+
+    cases: List[int] = [
+        pack([0xAA, 0x01, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00]), # 1 payload byte
+        pack([0x00, 0xAA, 0x02, 0x11, 0x22, 0x00, 0x00, 0x00]), # delayed start
+        pack([0xAA, 0x03, 0x11, 0x22, 0x33, 0xAA, 0x01, 0x44]), # two packets
+        pack([0xAA, 0x00, 0xAA, 0x01, 0x99, 0x00, 0x00, 0x00]), # zero length packet followed by valid
+        pack([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]), # no start
+        pack([0xAA, 0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66]), # truncated packet
+    ]
+    
+    for _ in range(24):
+        stream = [rng.randrange(0, 256) for _ in range(8)]
+        # ensure there's at least one 0xAA sometimes
+        if rng.random() > 0.3:
+            idx = rng.randrange(0, 5)
+            stream[idx] = 0xAA
+            stream[idx+1] = rng.randrange(0, 4)
+        cases.append(pack(stream))
+        
+    return [(v, _stream_packet_fsm(v)) for v in cases]
+
+
+STREAM_PACKET_FSM = FPGATask(
+    name="stream_packet_fsm",
+    in_bits=64,
+    out_bits=64,
+    baseline_cycles=120,
+    max_cycles_per_case=256,
+    prompt=(
+        "Simulate a packet parsing state machine over an 8-byte input array.\n"
+        "`data_in` contains 8 bytes, MSB-first: `data_in[63:56]=byte0` ... `data_in[7:0]=byte7`.\n"
+        "Your FSM must logically process one byte per state iteration.\n"
+        "Protocol: Wait for a START byte (0xAA). The very next byte is LEN.\n"
+        "The following LEN bytes are PAYLOAD bytes. After LEN bytes, return to waiting for START.\n"
+        "If LEN is 0, wait for START immediately on the next byte.\n"
+        "Output `data_out` is a 64-bit mask. For each byte i corresponding to `byte[i]`:\n"
+        "If `byte[i]` is a PAYLOAD byte, `data_out[8*(7-i) +: 8] = byte[i]`.\n"
+        "Otherwise, that output byte must be 0x00.\n"
+        "For example, processing `in=[0x00, 0xAA, 0x01, 0x55, 0x00...]`\n"
+        "yields `out=[0x00, 0x00, 0x00, 0x55, 0x00...]`.\n"
+        "You can solve this combinationally by unrolling the FSM across 8 stages,\n"
+        "or sequentially by maintaining state across cycles until processing all 8 bytes.\n"
+        "CAUTION: If you use a combinational `always @(*)` block, make sure to assign\n"
+        "default values to all variables to avoid Verilator LATCH errors.\n\n"
+        "module dut(\n"
+        "    input              clk,\n"
+        "    input              rst,\n"
+        "    input              start,\n"
+        "    input  [63:0]      data_in,\n"
+        "    output reg [63:0]  data_out,\n"
+        "    output reg         done\n"
+        ");\n"
+    ),
+    reference_py=_stream_packet_fsm,
+    vectors=_stream_packet_vectors,
+)
+
+
+def _weighted_scheduler(packed: int) -> int:
+    """Schedule amongst 4 requesters using priority + round-robin tie breaker.
+    data_in[3:0] = req mask (bit i = req i)
+    data_in[7:4] = weight0
+    data_in[11:8] = weight1
+    data_in[15:12] = weight2
+    data_in[19:16] = weight3
+    data_in[21:20] = round_robin_ptr (last served, or 0 at reset)
+    Output: the selected index (0..3), or 4 if no requests.
+    Rule: Pick active req with max weight. If tied, pick the one strictly NEXT
+    in cyclic order after round_robin_ptr. (e.g. if ptr=1, check 2, 3, 0, 1).
+    """
+    req = packed & 0xF
+    weights = [(packed >> (4 * i + 4)) & 0xF for i in range(4)]
+    rr_ptr = (packed >> 20) & 0x3
+    
+    if req == 0:
+        return 4
+        
+    # Find max weight of active
+    max_w = -1
+    for i in range(4):
+        if (req >> i) & 1:
+            if weights[i] > max_w:
+                max_w = weights[i]
+                
+    # Tie break using round robin
+    for offset in range(1, 5):
+        idx = (rr_ptr + offset) % 4
+        if ((req >> idx) & 1) and (weights[idx] == max_w):
+            return idx
+            
+    return 4
+
+
+def _weighted_scheduler_vectors(seed: int) -> List[Tuple[int, int]]:
+    rng = random.Random(seed)
+    
+    def pack(req: int, weights: List[int], ptr: int) -> int:
+        acc = req & 0xF
+        for i, w in enumerate(weights):
+            acc |= (w & 0xF) << (4 * i + 4)
+        acc |= (ptr & 0x3) << 20
+        return acc
+
+    cases: List[int] = [
+        pack(0b0000, [0,0,0,0], 0), # no requests -> 4
+        pack(0b1111, [5,10,15,5], 0), # clear max at idx 2
+        pack(0b0101, [8,0,8,0], 0), # tie 0 and 2. ptr=0, next is 2
+        pack(0b0101, [8,0,8,0], 2), # tie 0 and 2. ptr=2, next is 0 (wrap)
+        pack(0b0101, [8,0,8,0], 1), # tie 0 and 2. ptr=1, next is 2
+        pack(0b1111, [7,7,7,7], 3), # full tie. ptr=3, next is 0
+    ]
+    
+    for _ in range(24):
+        req = rng.randrange(0, 16)
+        weights = [rng.randrange(0, 16) for _ in range(4)]
+        ptr = rng.randrange(0, 4)
+        cases.append(pack(req, weights, ptr))
+        
+    return [(v, _weighted_scheduler(v)) for v in cases]
+
+
+WEIGHTED_SCHEDULER = FPGATask(
+    name="weighted_scheduler",
+    in_bits=22,
+    out_bits=3,
+    baseline_cycles=130,
+    max_cycles_per_case=64,
+    prompt=(
+        "Implement a weighted scheduler with round-robin tie-breaking among 4 requesters.\n"
+        "`data_in[3:0]` is the active request mask (bit i = requester i is active).\n"
+        "`data_in[7:4]` to `data_in[19:16]` are the 4-bit priorities for requesters 0 to 3.\n"
+        "`data_in[21:20]` is the `last_served_ptr` (the index of the last served requester).\n"
+        "Output `data_out[2:0]` with the index (0..3) of the winning requester. If `req == 0`, output 4.\n"
+        "Rule 1: Select the active requester with the maximum priority.\n"
+        "Rule 2: If there's a tie for maximum priority, select the tied requester\n"
+        "that comes STRICTLY AFTER `last_served_ptr` in cyclic order (e.g., if ptr=1, check 2, 3, 0, 1).\n"
+        "A combinational unrolled priority-masked tie-breaker handles this in one cycle.\n"
+        "CAUTION: If you use a combinational `always @(*)` block, make sure to assign\n"
+        "default values to all variables (like 'for' loop indices or intermediate regs)\n"
+        "to avoid Verilator LATCH errors.\n\n"
+        "module dut(\n"
+        "    input              clk,\n"
+        "    input              rst,\n"
+        "    input              start,\n"
+        "    input  [21:0]      data_in,\n"
+        "    output reg [2:0]   data_out,\n"
+        "    output reg         done\n"
+        ");\n"
+    ),
+    reference_py=_weighted_scheduler,
+    vectors=_weighted_scheduler_vectors,
+)
+
+
+def _sliding_window_max_4(packed: int) -> int:
+    """Emulate a sliding window max of size 4 over an 8-sample stream.
+    data_in[31:0] contains 8 x 4-bit samples MSB first (v0=MSB).
+    Output is 8 x 4-bit maxes MSB first, where out[i] = max(v[j] for j in max(0, i-3)..i).
+    """
+    vals = [(packed >> (4 * (7 - i))) & 0xF for i in range(8)]
+    out = 0
+    buffer = []
+    
+    for i, v in enumerate(vals):
+        buffer.append(v)
+        if len(buffer) > 4:
+            buffer.pop(0)
+        window_max = max(buffer)
+        out |= (window_max & 0xF) << (4 * (7 - i))
+        
+    return out
+
+
+def _sliding_window_vectors(seed: int) -> List[Tuple[int, int]]:
+    rng = random.Random(seed)
+    
+    def pack(vals: List[int]) -> int:
+        acc = 0
+        for i, v in enumerate(vals):
+            acc |= (v & 0xF) << (4 * (7 - i))
+        return acc
+
+    cases: List[int] = [
+        pack([0]*8),
+        pack([1,2,3,4,5,6,7,8]), # strictly rising, out == in
+        pack([8,7,6,5,4,3,2,1]), # strictly falling, max decays
+        pack([15,0,0,0,0,0,0,0]), # impulse response
+        pack([0,15,0,0,0,15,0,0]), # multiple impulses
+    ]
+    
+    for _ in range(25):
+        cases.append(pack([rng.randrange(0, 16) for _ in range(8)]))
+        
+    return [(v, _sliding_window_max_4(v)) for v in cases]
+
+
+SLIDING_WINDOW_MAX_4 = FPGATask(
+    name="sliding_window_max_4",
+    in_bits=32,
+    out_bits=32,
+    baseline_cycles=150,
+    max_cycles_per_case=128,
+    prompt=(
+        "Sliding window maximum emulation. `data_in[31:0]` contains 8 x 4-bit\n"
+        "samples packed MSB-first (`v0 = data_in[31:28]`, ..., `v7 = data_in[3:0]`).\n"
+        "Mentally simulate a 4-deep shift register processing these 8 samples in order.\n"
+        "For each sample `i` (0 to 7), compute the maximum of the elements currently\n"
+        "in the window (i.e. `max(v[max(0, i-3)] ... v[i])`).\n"
+        "Pack the 8 resulting maximums into `data_out[31:0]` matching the MSB-first layout.\n"
+        "This checks your ability to construct delay lines and reduction trees.\n"
+        "A fully unrolled combinational structure executes this in 1 cycle.\n\n"
+        "module dut(\n"
+        "    input              clk,\n"
+        "    input              rst,\n"
+        "    input              start,\n"
+        "    input  [31:0]      data_in,\n"
+        "    output reg [31:0]  data_out,\n"
+        "    output reg         done\n"
+        ");\n"
+    ),
+    reference_py=_sliding_window_max_4,
+    vectors=_sliding_window_vectors,
+)
+
+
+def _lru_cache_4(packed: int) -> int:
+    """Simulate a 4-entry LRU cache over a sequence of 4 accesses.
+    Initial state: cache contains keys [0, 1, 2, 3] with 0 being MRU and 3 being LRU.
+    Input: data_in[15:0] = 4 x 4-bit keys (k0 at MSB).
+    For each access k_i:
+      If k_i is in cache: HIT. Move k_i to MRU.
+      If k_i is not in cache: MISS. Replace LRU entry with k_i. Move k_i to MRU.
+    Output: data_out[3:0] where bit i is 1 if access i was a HIT. bits[3]=hit0, bits[0]=hit3.
+    """
+    keys = [(packed >> (4 * (3 - i))) & 0xF for i in range(4)]
+    cache = [0, 1, 2, 3] # Most Recently Used at index 0
+    hits = 0
+    
+    for i, k in enumerate(keys):
+        hit = False
+        try:
+            idx = cache.index(k)
+            hit = True
+            # Move to front
+            cache.pop(idx)
+            cache.insert(0, k)
+        except ValueError:
+            hit = False
+            # Replace LRU (last element) and move to front
+            cache.pop() # remove index 3
+            cache.insert(0, k)
+        
+        if hit:
+            hits |= (1 << (3 - i))
+            
+    return hits
+
+
+def _lru_cache_vectors(seed: int) -> List[Tuple[int, int]]:
+    rng = random.Random(seed)
+    def pack(vals: List[int]) -> int:
+        acc = 0
+        for i, v in enumerate(vals):
+            acc |= (v & 0xF) << (4 * (3 - i))
+        return acc
+
+    cases: List[int] = [
+        pack([0, 1, 2, 3]), # All hits (initial contains them) -> 0xF
+        pack([4, 5, 6, 7]), # All misses -> 0x0
+        pack([0, 4, 0, 4]), # Hit, Miss, Hit, Hit -> 1011 = 0xB? No.
+                            # 0: Hit. cache=[0,1,2,3]. bits=1000
+                            # 4: Miss. Replace 3. cache=[4,0,1,2]. bits=1000
+                            # 0: Hit. cache=[0,4,1,2]. bits=1010
+                            # 4: Hit. cache=[4,0,1,2]. bits=1011
+        pack([3, 2, 1, 0]), # All hits
+        pack([0, 0, 0, 0]), # Hit, Hit, Hit, Hit
+        pack([8, 8, 8, 8]), # Miss, Hit, Hit, Hit
+    ]
+    for _ in range(24):
+        cases.append(pack([rng.randrange(0, 16) for _ in range(4)]))
+    return [(v, _lru_cache_4(v)) for v in cases]
+
+
+LRU_CACHE_4 = FPGATask(
+    name="lru_cache_4",
+    in_bits=16,
+    out_bits=4,
+    baseline_cycles=160,
+    max_cycles_per_case=128,
+    prompt=(
+        "Simulate a 4-entry LRU (Least Recently Used) cache controller.\n"
+        "Initial state: The cache contains keys `{0, 1, 2, 3}`.\n"
+        "The initial LRU order is: 0 (MRU), 1, 2, 3 (LRU).\n"
+        "Input: `data_in[15:0]` contains 4 x 4-bit keys to access in sequence: `k0, k1, k2, k3`.\n"
+        "For each access `k_i`:\n"
+        "1. Check if `k_i` is currently in the cache (a HIT).\n"
+        "2. If it's a HIT, move that key to the Most Recently Used (MRU) position.\n"
+        "3. If it's a MISS, replace the Least Recently Used (LRU) key with `k_i` and move `k_i` to the MRU position.\n"
+        "Output: `data_out[3:0]` where `data_out[3-i]` is 1 if access `i` was a HIT, and 0 if it was a MISS.\n"
+        "Example: `in=[0, 4, 0, 4]` -> Access 0 (HIT), Access 4 (MISS), Access 0 (HIT), Access 4 (HIT) -> `out=4'b1011`.\n"
+        "Designing this requires tracking the relative age of 4 keys using a stack or priority matrix.\n\n"
+        "module dut(\n"
+        "    input              clk,\n"
+        "    input              rst,\n"
+        "    input              start,\n"
+        "    input  [15:0]      data_in,\n"
+        "    output reg [3:0]   data_out,\n"
+        "    output reg         done\n"
+        ");\n"
+    ),
+    reference_py=_lru_cache_4,
+    vectors=_lru_cache_vectors,
+)
+
+
+def _pipeline_hazard_3(packed: int) -> int:
+    """Detect RAW hazards in a 3-instruction sequence.
+    Each instruction (10 bits): [valid:1, rd:3, rs1:3, rs2:3]
+    Input: data_in[29:0] = instr0, instr1, instr2.
+    Output: data_out[1:0].
+      bit 0: instr1 depends on instr0.
+      bit 1: instr2 depends on instr0 or instr1.
+    A dependency exists if instr_j.valid and instr_k.valid and (instr_j.rs1 == instr_k.rd or instr_j.rs2 == instr_k.rd) where k < j.
+    Convention: rd=0 is always 'no write' (like RISC-V x0), so it never causes a hazard.
+    """
+    def unpack_inst(p):
+        return {
+            'v': (p >> 9) & 1,
+            'rd': (p >> 6) & 7,
+            'rs1': (p >> 3) & 7,
+            'rs2': p & 7
+        }
+    
+    insts = [unpack_inst((packed >> (10 * (2 - i))) & 0x3FF) for i in range(3)]
+    
+    h1 = 0
+    if insts[1]['v'] and insts[0]['v'] and insts[0]['rd'] != 0:
+        if insts[1]['rs1'] == insts[0]['rd'] or insts[1]['rs2'] == insts[0]['rd']:
+            h1 = 1
+            
+    h2 = 0
+    if insts[2]['v']:
+        # Check vs inst1
+        if insts[1]['v'] and insts[1]['rd'] != 0:
+            if insts[2]['rs1'] == insts[1]['rd'] or insts[2]['rs2'] == insts[1]['rd']:
+                h2 = 1
+        # Check vs inst0
+        if insts[0]['v'] and insts[0]['rd'] != 0:
+            if insts[2]['rs1'] == insts[0]['rd'] or insts[2]['rs2'] == insts[0]['rd']:
+                h2 = 1
+                
+    return (h2 << 1) | h1
+
+
+def _pipeline_hazard_vectors(seed: int) -> List[Tuple[int, int]]:
+    rng = random.Random(seed)
+    def pack(v, rd, rs1, rs2):
+        return ((v & 1) << 9) | ((rd & 7) << 6) | ((rs1 & 7) << 3) | (rs2 & 7)
+    
+    def pack_all(i0, i1, i2):
+        return (i0 << 20) | (i1 << 10) | i2
+
+    # i0: R1 = R2 + R3
+    # i1: R4 = R1 + R5 -> Hazard with i0 (bit 0)
+    # i2: R6 = R4 + R1 -> Hazard with i1 and i0 (bit 1)
+    
+    cases: List[int] = [
+        pack_all(pack(1,1,2,3), pack(1,4,1,5), pack(1,6,4,1)), # 0b11
+        pack_all(pack(1,1,2,3), pack(1,4,2,3), pack(1,5,6,7)), # 0b00 (no raw)
+        pack_all(pack(1,0,2,3), pack(1,4,0,5), pack(1,5,0,0)), # 0b00 (x0 is no-write)
+        pack_all(pack(1,1,2,3), pack(0,4,1,5), pack(1,6,1,7)), # 0b10 (i1 invalid, i2 vs i0 hazard)
+        pack_all(pack(1,2,1,1), pack(1,3,2,2), pack(1,4,3,3)), # 0b11
+    ]
+    for _ in range(25):
+        i0 = pack(rng.randrange(0,2), rng.randrange(0,8), rng.randrange(0,8), rng.randrange(0,8))
+        i1 = pack(rng.randrange(0,2), rng.randrange(0,8), rng.randrange(0,8), rng.randrange(0,8))
+        i2 = pack(rng.randrange(0,2), rng.randrange(0,8), rng.randrange(0,8), rng.randrange(0,8))
+        cases.append(pack_all(i0, i1, i2))
+    return [(v, _pipeline_hazard_3(v)) for v in cases]
+
+
+PIPELINE_HAZARD_3 = FPGATask(
+    name="pipeline_hazard_3",
+    in_bits=30,
+    out_bits=2,
+    baseline_cycles=140,
+    max_cycles_per_case=64,
+    prompt=(
+        "Detect RAW (Read-After-Write) hazards in a 3-instruction pipeline sequence.\n"
+        "Each 10-bit instruction word is formatted as: `[9]=valid, [8:6]=rd, [5:3]=rs1, [2:0]=rs2`.\n"
+        "Input: `data_in[29:20]=instr0`, `data_in[19:10]=instr1`, `data_in[9:0]=instr2`.\n"
+        "A hazard exists if a later instruction reads a register that an earlier instruction writes.\n"
+        "Rule 1: `rd=0` is a special 'no-write' register (like RISC-V x0); it never causes a hazard.\n"
+        "Rule 2: An instruction only participates in hazards if its `valid` bit is 1.\n"
+        "Output: `data_out[1:0]`:\n"
+        "- `data_out[0] = 1` iff `instr1` has a RAW dependency on `instr0`.\n"
+        "- `data_out[1] = 1` iff `instr2` has a RAW dependency on `instr0` OR `instr1`.\n"
+        "RAW dependency check: `(instr_j.rs1 == instr_k.rd OR instr_j.rs2 == instr_k.rd)` where `k < j`.\n\n"
+        "module dut(\n"
+        "    input              clk,\n"
+        "    input              rst,\n"
+        "    input              start,\n"
+        "    input  [29:0]      data_in,\n"
+        "    output reg [1:0]   data_out,\n"
+        "    output reg         done\n"
+        ");\n"
+    ),
+    reference_py=_pipeline_hazard_3,
+    vectors=_pipeline_hazard_vectors,
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -1839,6 +2304,9 @@ TASK_REGISTRY: Dict[str, FPGATask] = {
         SUBSET_SUM_4X6, INVERSION_4X4,
         # Aggregate / reduction
         HISTOGRAM_4BIN, ARGMAX_ARGMIN_4X8,
+        # Complex State Machines & Microarchitecture
+        STREAM_PACKET_FSM, WEIGHTED_SCHEDULER, SLIDING_WINDOW_MAX_4,
+        LRU_CACHE_4, PIPELINE_HAZARD_3,
     ]
 }
 

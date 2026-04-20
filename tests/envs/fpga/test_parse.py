@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from rlvr_envs.envs.fpga.parse import parse_submission
 
 _VERILOG = """module dut(
